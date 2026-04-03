@@ -367,12 +367,10 @@ Dashboard 為自包含的單一 HTML 檔案，使用 CDN 載入 Tailwind CSS 和
 ## Project Structure
 
 ```
-naya-stock-analyzer/
+fubon-stock-advisor/
 │
 ├── stock-orchestrator/           # 🎯 指揮官 — 整體流程控制
-│   ├── SKILL.md                  #    Skill 定義（觸發條件、7 步驟流程）
-│   └── scripts/
-│       └── run_pipeline.py       #    Python fallback pipeline
+│   └── SKILL.md                  #    Skill 定義（觸發條件、7 步驟流程）
 │
 ├── stock-data-fetcher/           # 📥 資料抓取 — Yahoo Finance
 │   ├── SKILL.md

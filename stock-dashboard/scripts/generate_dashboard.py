@@ -58,7 +58,17 @@ def load_logo_base64():
 
 def load_avatar_base64(name):
     """Load analyst avatar as base64 data URI."""
-    avatar_path = Path(__file__).parent.parent / 'assets' / 'avatars' / f'{name}.png'
+    # Map analyst keys to avatar filenames
+    avatar_map = {
+        'financial_analyst': 'financial',
+        'technical_analyst': 'technical',
+        'quantitative_analyst': 'quant',
+        'industry_macro': 'industry',
+        'news_sentiment': 'sentiment',
+        'institutional_flow': 'institutional',
+    }
+    filename = avatar_map.get(name, name)
+    avatar_path = Path(__file__).parent.parent / 'assets' / 'avatars' / f'{filename}.png'
     if avatar_path.exists():
         b64 = base64.b64encode(avatar_path.read_bytes()).decode('utf-8')
         return f'data:image/png;base64,{b64}'
