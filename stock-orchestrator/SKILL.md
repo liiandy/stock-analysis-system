@@ -33,6 +33,27 @@ Follow these steps **exactly** in order:
 - If the user gives a company name (e.g. "鴻海"), map it to the correct ticker (e.g. `2317.TW`)
 - Determine the output directory: `{{OUTPUT_DIR}}/{ticker_lowercase}/`
 
+### Step 1.5: Cache Check (Today's Report)
+Run this check via Bash:
+```bash
+# Check if today's dashboard already exists
+TODAY=$(date +%Y-%m-%d)
+DASHBOARD="{{OUTPUT_DIR}}/{name}/dashboard.html"
+if [ -f "$DASHBOARD" ]; then
+  FILE_DATE=$(stat -f '%Sm' -t '%Y-%m-%d' "$DASHBOARD" 2>/dev/null || date -r "$DASHBOARD" +%Y-%m-%d 2>/dev/null)
+  if [ "$FILE_DATE" = "$TODAY" ]; then
+    echo "CACHE_HIT"
+  else
+    echo "CACHE_MISS_STALE"
+  fi
+else
+  echo "CACHE_MISS_NONE"
+fi
+```
+
+- If result is **`CACHE_HIT`**: Tell the user "今日已有 {ticker} 分析報告，直接開啟", then run `open {{OUTPUT_DIR}}/{name}/dashboard.html` and **STOP** — skip all remaining steps.
+- If result is `CACHE_MISS_STALE` or `CACHE_MISS_NONE`: Continue to Step 2.
+
 ### Step 2: Fetch & Validate Data (Python scripts)
 Run these two commands sequentially via Bash:
 
@@ -43,15 +64,24 @@ python {{SKILLS_DIR}}/stock-data-validator/scripts/validate_data.py --input {{OU
 
 If either fails, report the error and stop.
 
-### Step 3: Read Validated Data
-Use the Read tool to read `validated_data.json`. Extract and note the key data points you'll need to pass to analyst agents:
-- Company info (name, sector, industry, market cap, PE, PB, EPS, ROE, margins, etc.)
-- Latest price and price history summary
+### Step 3: Read Validated Data & Quality Gate
+Use the Read tool to read `validated_data.json`. **Before proceeding, check these quality gates:**
+
+1. **`passed_validation`** must be `true` (overall confidence >= 50). If `false`, report the validation failures to the user and stop.
+2. **Review `validation_notes`** — report any warnings to the user (e.g., stale data, missing sections, anomalies).
+3. **Review `anomaly_detection`** — if there are `high` severity anomalies, warn the user that analysis reliability may be reduced.
+4. **Check `data_completeness.completeness_pct`** — if below 60%, warn the user about missing data sections.
+5. **Check `confidence_scores`** per category — if any category scores below 50, note that the corresponding analyst's output should be weighted lower.
+
+Then extract the key data points from `validated_data.validated_data` (the nested structure):
+- Company info (name, sector, industry, market cap, PE, PB, EPS, ROE, margins, currency, current_price, etc.)
+- Latest price and price history summary (now 2 years of data)
 - Technical indicators (RSI, MACD, Bollinger Bands, KD)
 - Financial statements summary
-- News headlines
 - Holder information
 - Analyst recommendations
+- **TWSE data** (for Taiwan stocks): `twse_data.institutional_trading` (三大法人買賣超) and `twse_data.margin_trading` (融資融券)
+- **Note**: News is NOT in validated_data — the sentiment agent handles news collection independently via WebSearch
 
 ### Step 4: Launch 6 Analyst Agents (in parallel)
 Use the **Agent tool** to launch 6 agents simultaneously. Each agent receives:
@@ -64,12 +94,16 @@ The 6 analysts are:
 2. **Technical Analyst** — Price action analysis (trend, support/resistance, momentum indicators)
 3. **Quantitative Analyst** — First run `python {{SKILLS_DIR}}/stock-quant-analyst/scripts/analyze_quant.py --input {validated_data} --output {output_dir}/quant_analysis.json`, then interpret the results
 4. **Industry & Macro Analyst** — Sector positioning, competitive landscape, macro environment
-5. **News Sentiment Analyst** — News sentiment classification, major events, sentiment trends. **IMPORTANT**: If the news data from yfinance is empty or has blank titles (common for Taiwan/Japan stocks), the agent MUST use WebSearch to find 5-10 recent news articles about the company before performing sentiment analysis. Search queries like "{company_name} 股票 新聞" or "{ticker} news". Never submit a "no data" analysis.
-6. **Institutional Flow Analyst** — Ownership structure, analyst consensus, smart money signals
+5. **News Sentiment Analyst** — News sentiment classification, major events, sentiment trends. **News is NOT in validated_data.** The agent must independently collect news via WebSearch → WebFetch → neutral fallback. **Must include `sources` array with URL for every article analyzed.** The agent must NEVER use training data / memory as a news source.
+6. **Institutional Flow Analyst** — Ownership structure, analyst consensus, smart money signals. **For Taiwan stocks**: Include TWSE institutional trading data (三大法人買賣超) and margin trading data (融資融券) from `validated_data.twse_data`.
 
 **IMPORTANT**: For each agent prompt, include the actual data values from validated_data.json so the agent can reason about them. Don't just tell the agent to "read the file" — provide the data inline.
 
-Each agent must write a JSON file to the output directory with its analysis results.
+**CRITICAL — Zero Hallucination Directive (傳達給每個 agent)**:
+Every agent prompt MUST include this instruction block verbatim:
+> 你必須遵守 Zero Hallucination Policy：(1) 絕對禁止使用訓練資料填補缺失數據 (2) 所有缺失或不確定的資料必須列入 data_limitations 欄位 (3) summary 最後一段必須以「⚠ 資料限制」揭露不足之處 (4) 寧可留白不可捏造。data_limitations 為必填欄位。
+
+Each agent must write a JSON file to the output directory with its analysis results. **Every agent output must include a `data_limitations` array field.**
 
 ### Step 5: Integration — Synthesize All Analyses
 After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN reasoning as Claude, produce `integrated_report.json` that matches this EXACT structure:
@@ -101,7 +135,14 @@ After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN r
     "technical_analyst": { ... },
     "quantitative_analyst": { ... },
     "industry_macro": { ... },
-    "news_sentiment": { ... },
+    "news_sentiment": {
+      "score": 6.0,
+      "confidence": "Medium",
+      "summary": "...",
+      "sources": [
+        {"title": "新聞標題", "url": "https://...", "publisher": "來源", "date": "2026-04-01", "source_type": "WebSearch"}
+      ]
+    },
     "institutional_flow": { ... }
   },
   "narrative_report": {
@@ -109,7 +150,8 @@ After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN r
     "fundamental_analysis": "Detailed fundamental analysis paragraph in Chinese...",
     "technical_analysis": "Detailed technical analysis paragraph in Chinese...",
     "risk_factors": "Key risk factors paragraph in Chinese...",
-    "investment_recommendation": "Clear actionable recommendation in Chinese..."
+    "investment_recommendation": "Clear actionable recommendation in Chinese...",
+    "data_limitations": "彙整所有分析師回報的資料限制，以條列方式呈現（繁體中文）"
   },
   "metrics": {
     "pe_ratio": 12.5,
@@ -118,9 +160,22 @@ After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN r
     "roe": "22.5%",
     "dividend_yield": "3.2%",
     "debt_ratio": "45.2%"
-  }
+  },
+  "data_limitations": [
+    "從各 agent 的 data_limitations 彙整而來的完整清單",
+    "每個 agent 回報的限制都必須保留，不可刪除或淡化"
+  ]
 }
 ```
+
+**CRITICAL — 禁止截斷 analyst summary**：每位分析師的 `summary` 必須**完整複製**，不可截斷、省略或摘要化。若 summary 很長（例如產業分析師常有 5-8 段），仍必須全文保留。截斷會導致 dashboard 顯示不完整。
+
+**news_sentiment 必須包含 `sources` 欄位**：從 sentiment agent 的 output 中複製完整的 `sources` 陣列到 `analysts.news_sentiment.sources`，dashboard 會用來顯示參考連結。
+
+**data_limitations 去重與標註來源**：彙整各 agent 的 `data_limitations` 時：
+1. 若某限制已被其他分析師的工作涵蓋（例如量化分析師說「未納入法人籌碼」但法人籌碼分析師已分析），則標註「（此限制已由其他維度分析涵蓋）」或直接移除
+2. 若量化分析已獨立計算 Beta（透過回歸分析），則移除「Beta 未經獨立回歸驗證」之類的限制
+3. 保留所有無法被系統涵蓋的真實限制
 
 **company_name 必須使用繁體中文公司名稱**（例如「鴻海精密工業」而非 "Hon Hai Precision Industry Co., Ltd."）。yfinance 回傳的是英文名稱，你需要翻譯為正式的中文公司名。
 
@@ -134,6 +189,12 @@ After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN r
 **Confidence levels**: "Very High", "High", "Medium-High", "Medium", "Medium-Low", "Low"
 
 **All narrative_report content MUST be written in Traditional Chinese (繁體中文)**, providing professional investment-grade analysis.
+
+**Data Limitations Integration (必做)**:
+1. 讀取每個 agent output 的 `data_limitations` 欄位
+2. 彙整所有限制到 `integrated_report.data_limitations` 陣列（不可遺漏任何一條）
+3. 在 `narrative_report.data_limitations` 中以自然語言段落描述主要限制
+4. 若超過 3 個 agent 報告重大資料限制，整體 `confidence_level` 不得高於 "Medium"
 
 ### Step 6: Generate Dashboard (Python script)
 ```bash

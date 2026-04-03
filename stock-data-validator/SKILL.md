@@ -15,10 +15,10 @@ You are a Data Quality Validator Agent responsible for ensuring that all stock d
 - Report which source has the most reliable data for each metric
 
 ### 2. Timeliness Filtering
-- Price data: must be <15 minutes old
-- Financial data: must be <90 days old
+- Price data: latest record must be within 3 calendar days (yfinance provides daily EOD data; weekends cause 2-day gaps)
+- Financial data: must be <120 days old (quarterly reports can lag ~4 months)
 - News/sentiment data: must be <30 days old
-- Reject expired data with clear rationale
+- Flag stale data with clear rationale
 
 ### 3. Anomaly Detection
 - PE ratio sanity check: 0 < PE < 500 (flag outliers)
@@ -57,14 +57,31 @@ Return a structured JSON package containing:
 - `notes`: validation warnings and explanations
 
 ## Key Thresholds
-- Price data freshness: <15 minutes
-- Financial data freshness: <90 days
+- Price data freshness: <3 calendar days (daily EOD data)
+- Financial data freshness: <120 days
 - News data freshness: <30 days
 - PE ratio range: 0 to 500
+- PB ratio range: 0 to 100
 - Single-day price change tolerance: <20%
-- EPS quarterly growth tolerance: <300%
-- Cross-source tolerance: <2% difference
+- Volume spike threshold: >500% of average
+- Dividend yield anomaly: >20%
+- Minimum price history records: 20
 - Minimum confidence to pass: 50
+
+## Data Schema
+
+The validator expects the **nested JSON structure** from `fetch_data.py`:
+```
+metadata → ticker, fetch_timestamp, missing_data[]
+company_info → pe_ratio, pb_ratio, current_price, currency, ...
+price_history[] → date, close, volume, ...
+technical_indicators → rsi_14, macd, bollinger_bands, stochastic_kd
+financial_statements → income_statement, balance_sheet, cash_flow
+news[] → title, publish_date, publisher
+holders, analyst_data
+```
+
+The validated output preserves this nested structure inside `validated_data` and adds: `confidence_scores`, `anomaly_detection`, `validation_notes`, `data_completeness`, `data_freshness`.
 
 ## Implementation Reference
 See `scripts/validate_data.py` for the validation engine that implements these rules programmatically.

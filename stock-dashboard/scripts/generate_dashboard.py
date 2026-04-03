@@ -158,9 +158,24 @@ def generate_html_dashboard(integrated_report, validated_data):
         label_zh, label_en = analyst_labels.get(analyst_name, (analyst_name, analyst_name))
         avatar_uri = load_avatar_base64(analyst_name)
 
+        # Build sources HTML for news_sentiment analyst
+        sources_html = ""
+        if analyst_name == 'news_sentiment':
+            sources = analyst_data.get('sources', [])
+            if sources:
+                sources_items = ""
+                for src in sources:
+                    title = src.get('title', '未知標題')
+                    url = src.get('url', '#')
+                    publisher = src.get('publisher', '未知來源')
+                    date = src.get('date', '')
+                    date_str = f' ({date})' if date else ''
+                    sources_items += f'<li><a href="{url}" target="_blank" rel="noopener">{title}</a><span class="source-meta"> — {publisher}{date_str}</span></li>'
+                sources_html = f'<div class="analyst-sources"><div class="sources-title">參考來源 Sources ({len(sources)})</div><ul>{sources_items}</ul></div>'
+
         analyst_views_html += f"""
-        <div class="analyst-row" onclick="toggleAnalyst(this)">
-            <div class="analyst-header">
+        <div class="analyst-row">
+            <div class="analyst-header" onclick="toggleAnalyst(this.parentNode)">
                 <div class="analyst-left">
                     <div class="analyst-avatar"><img src="{avatar_uri}" alt="{label_zh}"></div>
                     <div>
@@ -176,7 +191,7 @@ def generate_html_dashboard(integrated_report, validated_data):
                     <span class="analyst-arrow">+</span>
                 </div>
             </div>
-            <div class="analyst-detail"><p>{analyst_summary}</p></div>
+            <div class="analyst-detail"><p>{analyst_summary}</p>{sources_html}</div>
         </div>"""
 
     # Build financial metrics
@@ -204,6 +219,22 @@ def generate_html_dashboard(integrated_report, validated_data):
     technical_text = narrative.get('technical_analysis', 'No analysis available')
     risk_text = narrative.get('risk_factors', 'No risk analysis available')
     recommendation_text = narrative.get('investment_recommendation', 'No recommendation available')
+
+    # Build data limitations section
+    data_limitations = integrated_report.get('data_limitations', [])
+    narrative_limitations = narrative.get('data_limitations', '')
+    limitations_html = ""
+    if data_limitations or narrative_limitations:
+        items_html = ""
+        if narrative_limitations:
+            items_html += f'<p style="margin-bottom:12px">{narrative_limitations}</p>'
+        if data_limitations:
+            items_html += '<ul style="margin:0;padding-left:20px">'
+            for item in data_limitations:
+                items_html += f'<li style="margin-bottom:4px;font-size:13px;color:var(--g600)">{item}</li>'
+            items_html += '</ul>'
+        limitations_html = f"""
+                <div class="report-block"><div class="report-heading" style="border-left-color:var(--amber);color:var(--amber)">&#9888; 資料限制 Data Limitations</div><div class="report-text">{items_html}</div></div>"""
 
     conf_map = {
         'Very High': 95, 'High': 85, 'Medium-High': 75,
@@ -306,8 +337,16 @@ def generate_html_dashboard(integrated_report, validated_data):
         .analyst-bar{{height:100%;border-radius:3px}}
         .analyst-arrow{{font-size:14px;color:var(--g400);width:20px;text-align:center}}
         .analyst-detail{{max-height:0;overflow:hidden;transition:max-height .3s ease}}
-        .analyst-detail.open{{max-height:300px}}
+        .analyst-detail.open{{max-height:5000px}}
         .analyst-detail p{{padding:0 20px 16px 68px;font-size:13px;color:var(--g600);line-height:1.7}}
+        .analyst-sources{{padding:0 20px 16px 68px}}
+        .sources-title{{font-size:12px;font-weight:700;color:var(--navy);margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--g200)}}
+        .analyst-sources ul{{list-style:none;padding:0;margin:0}}
+        .analyst-sources li{{font-size:12px;line-height:1.6;padding:3px 0;border-bottom:1px dotted var(--g200)}}
+        .analyst-sources li:last-child{{border-bottom:none}}
+        .analyst-sources a{{color:var(--navy);text-decoration:none}}
+        .analyst-sources a:hover{{text-decoration:underline;color:var(--green)}}
+        .source-meta{{color:var(--g400);font-size:11px}}
 
         .report-block{{margin-bottom:24px}}
         .report-block:last-child{{margin-bottom:0}}
@@ -422,7 +461,7 @@ def generate_html_dashboard(integrated_report, validated_data):
                 <div class="report-block"><div class="report-heading">投資摘要 Investment Summary</div><div class="report-text">{summary_text}</div></div>
                 <div class="report-block"><div class="report-heading">基本面分析 Fundamental Analysis</div><div class="report-text">{fundamental_text}</div></div>
                 <div class="report-block"><div class="report-heading">技術面分析 Technical Analysis</div><div class="report-text">{technical_text}</div></div>
-                <div class="report-block"><div class="report-heading">風險因素 Risk Factors</div><div class="report-text">{risk_text}</div></div>
+                <div class="report-block"><div class="report-heading">風險因素 Risk Factors</div><div class="report-text">{risk_text}</div></div>{limitations_html}
                 <div class="report-block"><div class="report-heading">投資建議 Recommendation</div><div class="report-text">{recommendation_text}</div></div>
             </div></div>
         </section>
@@ -443,7 +482,7 @@ def generate_html_dashboard(integrated_report, validated_data):
     </div>
 
     <script>
-        function toggleAnalyst(row){{var d=row.querySelector('.analyst-detail'),a=row.querySelector('.analyst-arrow'),o=d.classList.contains('open');document.querySelectorAll('.analyst-detail').forEach(function(x){{x.classList.remove('open')}});document.querySelectorAll('.analyst-arrow').forEach(function(x){{x.textContent='+'}});if(!o){{d.classList.add('open');a.textContent='\u2212'}}}}
+        function toggleAnalyst(row){{var d=row.querySelector('.analyst-detail'),a=row.querySelector('.analyst-arrow');if(d.classList.contains('open')){{d.classList.remove('open');a.textContent='+'}}else{{d.classList.add('open');a.textContent='\u2212'}}}}
         var ctx=document.getElementById('radarChart').getContext('2d');
         new Chart(ctx,{{type:'radar',data:{{labels:['財務','技術','量化','產業','情緒','籌碼'],datasets:[{{label:'Score',data:[{radar_data['fundamental']:.1f},{radar_data['technical']:.1f},{radar_data['quantitative']:.1f},{radar_data['industry']:.1f},{radar_data['sentiment']:.1f},{radar_data['fund_flow']:.1f}],borderColor:'#003366',backgroundColor:'rgba(0,51,102,0.08)',fill:true,pointBackgroundColor:'#003366',pointBorderColor:'#fff',pointBorderWidth:2,borderWidth:2,pointRadius:4,pointHoverRadius:6}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{r:{{beginAtZero:true,max:100,ticks:{{color:'#adb5bd',stepSize:20,backdropColor:'transparent',font:{{size:10}}}},grid:{{color:'#dee2e6'}},angleLines:{{color:'#dee2e6'}},pointLabels:{{color:'#495057',font:{{size:12,weight:'600'}}}}}}}}}}}});
     </script>

@@ -16,6 +16,8 @@ import argparse
 import json
 import logging
 import sys
+import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from pandas import DataFrame, Timestamp
+from pandas import DataFrame
 
 
 # Configure logging
@@ -70,9 +72,12 @@ class StockDataFetcher:
                 "balance_sheet": {},
                 "cash_flow": {}
             },
-            "news": [],
             "holders": {},
-            "analyst_data": {}
+            "analyst_data": {},
+            "twse_data": {
+                "institutional_trading": {},
+                "margin_trading": {}
+            }
         }
         self.yf_ticker = None
         self.price_df = None
@@ -95,10 +100,14 @@ class StockDataFetcher:
             self._fetch_company_info()
             self._fetch_price_history()
             self._fetch_financial_statements()
-            self._fetch_news()
             self._fetch_holders()
             self._fetch_analyst_data()
             self._calculate_technical_indicators()
+
+            # Fetch TWSE data for Taiwan-listed stocks
+            if self.ticker.endswith('.TW') or self.ticker.endswith('.TWO'):
+                self._fetch_twse_institutional()
+                self._fetch_twse_margin()
 
             self.data["metadata"]["api_status"] = "success"
             self.logger.info(f"Successfully fetched data for {self.ticker}")
@@ -159,6 +168,12 @@ class StockDataFetcher:
                 "beta": _serialize_value(info.get("beta")),
                 "website": info.get("website", ""),
                 "description": info.get("longBusinessSummary", "")[:500],  # Truncate for brevity
+                "currency": info.get("currency", ""),
+                "exchange": info.get("exchange", ""),
+                "current_price": _serialize_value(info.get("currentPrice") or info.get("regularMarketPrice")),
+                "previous_close": _serialize_value(info.get("previousClose") or info.get("regularMarketPreviousClose")),
+                "average_volume": _serialize_value(info.get("averageVolume")),
+                "average_volume_10d": _serialize_value(info.get("averageDailyVolume10Day")),
             }
 
             self.data["company_info"] = company_info
@@ -169,24 +184,22 @@ class StockDataFetcher:
             self.data["metadata"]["missing_data"].append("company_info")
 
     def _fetch_price_history(self) -> None:
-        """Fetch historical price data (1 year of daily data)."""
+        """Fetch historical price data (2 years to ensure sufficient data for all indicators)."""
         try:
-            self.logger.debug("Fetching price history...")
+            self.logger.debug("Fetching price history (2 years)...")
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=365)
+            start_date = end_date - timedelta(days=730)
 
             self.price_df = self.yf_ticker.history(start=start_date, end=end_date)
 
             if self.price_df.empty:
                 raise ValueError("No price data retrieved")
 
-            # Add moving averages
-            self.price_df['MA_5'] = self.price_df['Close'].rolling(window=5, min_periods=1).mean()
-            self.price_df['MA_10'] = self.price_df['Close'].rolling(window=10, min_periods=1).mean()
-            self.price_df['MA_20'] = self.price_df['Close'].rolling(window=20, min_periods=1).mean()
-            self.price_df['MA_60'] = self.price_df['Close'].rolling(window=60, min_periods=1).mean()
-            self.price_df['MA_120'] = self.price_df['Close'].rolling(window=120, min_periods=1).mean()
-            self.price_df['MA_240'] = self.price_df['Close'].rolling(window=240, min_periods=1).mean()
+            # Add moving averages (require full window to avoid misleading partial MAs)
+            for window in (5, 10, 20, 60, 120, 240):
+                self.price_df[f'MA_{window}'] = self.price_df['Close'].rolling(
+                    window=window, min_periods=window
+                ).mean()
 
             # Convert to serializable format
             price_history = []
@@ -277,12 +290,16 @@ class StockDataFetcher:
 
     @staticmethod
     def _calculate_rsi(prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate Relative Strength Index."""
+        """Calculate Relative Strength Index using Wilder's smoothing (EMA)."""
         delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=1).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=1).mean()
+        gain = delta.where(delta > 0, 0.0)
+        loss = -delta.where(delta < 0, 0.0)
 
-        rs = gain / loss.replace(0, np.nan)
+        # Wilder's smoothing = EMA with alpha=1/period
+        avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+        rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi = 100 - (100 / (1 + rs))
         return rsi
 
@@ -299,8 +316,8 @@ class StockDataFetcher:
     @staticmethod
     def _calculate_bollinger_bands(prices: pd.Series, period: int = 20, std_dev: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
         """Calculate Bollinger Bands."""
-        sma = prices.rolling(window=period, min_periods=1).mean()
-        std = prices.rolling(window=period, min_periods=1).std()
+        sma = prices.rolling(window=period, min_periods=period).mean()
+        std = prices.rolling(window=period, min_periods=period).std()
         upper_band = sma + (std * std_dev)
         lower_band = sma - (std * std_dev)
         return upper_band, sma, lower_band
@@ -308,11 +325,11 @@ class StockDataFetcher:
     @staticmethod
     def _calculate_stochastic(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 9) -> Tuple[pd.Series, pd.Series]:
         """Calculate Stochastic %K and %D."""
-        low_min = low.rolling(window=period, min_periods=1).min()
-        high_max = high.rolling(window=period, min_periods=1).max()
+        low_min = low.rolling(window=period, min_periods=period).min()
+        high_max = high.rolling(window=period, min_periods=period).max()
 
         k_percent = 100 * ((close - low_min) / (high_max - low_min).replace(0, np.nan))
-        d_percent = k_percent.rolling(window=3, min_periods=1).mean()
+        d_percent = k_percent.rolling(window=3, min_periods=3).mean()
 
         return k_percent, d_percent
 
@@ -354,33 +371,107 @@ class StockDataFetcher:
 
         return result
 
-    def _fetch_news(self) -> None:
-        """Fetch recent news headlines."""
+    def _fetch_twse_institutional(self) -> None:
+        """Fetch TWSE institutional trading data (三大法人買賣超) for Taiwan stocks."""
         try:
-            self.logger.debug("Fetching news...")
-            news_list = []
+            self.logger.debug("Fetching TWSE institutional trading data...")
+            stock_no = self.ticker.replace('.TW', '').replace('.TWO', '')
 
-            try:
-                news_data = self.yf_ticker.news
-                if news_data:
-                    for article in news_data[:20]:  # Limit to 20 most recent
-                        news_record = {
-                            "title": article.get("title", ""),
-                            "publisher": article.get("publisher", ""),
-                            "link": article.get("link", ""),
-                            "publish_date": _serialize_timestamp(article.get("providerPublishTime")),
-                            "type": article.get("type", "")
-                        }
-                        news_list.append(news_record)
-            except Exception as e:
-                self.logger.debug(f"News fetching encountered: {str(e)}")
+            # Try last 5 trading days to find data
+            results = []
+            for days_back in range(0, 10):
+                target_date = datetime.now() - timedelta(days=days_back)
+                date_str = target_date.strftime('%Y%m%d')
+                url = (
+                    f"https://www.twse.com.tw/rwd/zh/fund/T86"
+                    f"?date={date_str}&selectType=ALLBUT0999&response=json"
+                )
+                try:
+                    req = urllib.request.Request(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Accept': 'application/json',
+                    })
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
 
-            self.data["news"] = news_list
-            self.logger.debug(f"News fetched: {len(news_list)} articles")
+                    if data.get('stat') == 'OK' and data.get('data'):
+                        for row in data['data']:
+                            if row[0].strip() == stock_no:
+                                results.append({
+                                    "date": target_date.strftime('%Y-%m-%d'),
+                                    "foreign_buy_sell": _safe_int(row[4]),
+                                    "investment_trust_buy_sell": _safe_int(row[10]),
+                                    "dealer_buy_sell": _safe_int(row[11]),
+                                    "total_institutional_buy_sell": _safe_int(row[18]) if len(row) > 18 else None,
+                                })
+                                break
+                    if results:
+                        break  # Found data, stop looking
+                    time.sleep(0.3)  # Rate limiting
+                except Exception as e:
+                    self.logger.debug(f"TWSE fetch for {date_str}: {e}")
+                    continue
+
+            if results:
+                self.data["twse_data"]["institutional_trading"] = results
+                self.logger.debug(f"TWSE institutional data fetched: {len(results)} days")
+            else:
+                self.data["metadata"]["missing_data"].append("twse_institutional")
+                self.logger.debug("No TWSE institutional data found")
 
         except Exception as e:
-            self.logger.warning(f"Failed to fetch news: {str(e)}")
-            self.data["metadata"]["missing_data"].append("news")
+            self.logger.warning(f"Failed to fetch TWSE institutional data: {e}")
+            self.data["metadata"]["missing_data"].append("twse_institutional")
+
+    def _fetch_twse_margin(self) -> None:
+        """Fetch TWSE margin trading data (融資融券) for Taiwan stocks."""
+        try:
+            self.logger.debug("Fetching TWSE margin trading data...")
+            stock_no = self.ticker.replace('.TW', '').replace('.TWO', '')
+
+            for days_back in range(0, 10):
+                target_date = datetime.now() - timedelta(days=days_back)
+                date_str = target_date.strftime('%Y%m%d')
+                url = (
+                    f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
+                    f"?date={date_str}&selectType=ALL&response=json"
+                )
+                try:
+                    req = urllib.request.Request(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Accept': 'application/json',
+                    })
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        data = json.loads(resp.read().decode('utf-8'))
+
+                    if data.get('stat') == 'OK' and data.get('tables'):
+                        # tables[1] contains individual stock margin data
+                        table = data['tables'][1] if len(data['tables']) > 1 else data['tables'][0]
+                        rows = table.get('data', [])
+                        for row in rows:
+                            if row[0].strip() == stock_no:
+                                self.data["twse_data"]["margin_trading"] = {
+                                    "date": target_date.strftime('%Y-%m-%d'),
+                                    "margin_buy": _safe_int(row[1]),
+                                    "margin_sell": _safe_int(row[2]),
+                                    "margin_balance": _safe_int(row[4]),
+                                    "short_sell": _safe_int(row[6]),
+                                    "short_cover": _safe_int(row[7]),
+                                    "short_balance": _safe_int(row[9]),
+                                }
+                                self.logger.debug(f"TWSE margin data fetched for {date_str}")
+                                return
+                    time.sleep(0.3)
+                except Exception as e:
+                    self.logger.debug(f"TWSE margin fetch for {date_str}: {e}")
+                    continue
+
+            self.data["metadata"]["missing_data"].append("twse_margin")
+            self.logger.debug("No TWSE margin data found")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch TWSE margin data: {e}")
+            self.data["metadata"]["missing_data"].append("twse_margin")
 
     def _fetch_holders(self) -> None:
         """Fetch major shareholders information."""
@@ -486,6 +577,16 @@ class StockDataFetcher:
             raise
 
 
+def _safe_int(value: Any) -> Optional[int]:
+    """Parse TWSE numeric strings (may contain commas) to int."""
+    if value is None:
+        return None
+    try:
+        return int(str(value).replace(',', '').strip())
+    except (ValueError, TypeError):
+        return None
+
+
 def _serialize_value(value: Any) -> Any:
     """Convert pandas/numpy types to JSON-serializable Python types."""
     if value is None:
@@ -503,20 +604,6 @@ def _serialize_value(value: Any) -> Any:
     if isinstance(value, (list, dict)):
         return value
     return str(value)
-
-
-def _serialize_timestamp(timestamp: Any) -> Optional[str]:
-    """Convert timestamp to ISO format string."""
-    if timestamp is None:
-        return None
-    if isinstance(timestamp, Timestamp):
-        return timestamp.isoformat()
-    if isinstance(timestamp, datetime):
-        return timestamp.isoformat()
-    if isinstance(timestamp, int):
-        # Unix timestamp
-        return datetime.fromtimestamp(timestamp).isoformat()
-    return str(timestamp)
 
 
 def _interpret_rsi(rsi_value: float) -> str:

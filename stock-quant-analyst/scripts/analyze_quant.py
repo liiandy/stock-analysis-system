@@ -13,9 +13,12 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 import statistics
+import logging
 
 import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
+
+logger = logging.getLogger(__name__)
 
 
 class QuantAnalyzer:
@@ -161,39 +164,43 @@ class QuantAnalyzer:
             return {'value': None, 'date_peak': None, 'date_trough': None, 'recovery_days': None}
 
         max_drawdown = 0
-        peak_idx = 0
-        trough_idx = 0
-        peak_price = prices[0]
+        best_peak_idx = 0
+        best_trough_idx = 0
 
-        # Find peak and trough
+        # Running peak tracks the highest price seen so far and its index
+        running_peak = prices[0]
+        running_peak_idx = 0
+
         for i in range(1, len(prices)):
-            if prices[i] > peak_price:
-                peak_price = prices[i]
-                peak_idx = i
+            if prices[i] > running_peak:
+                running_peak = prices[i]
+                running_peak_idx = i
 
-            current_drawdown = (peak_price - prices[i]) / peak_price
-            if current_drawdown > max_drawdown:
-                max_drawdown = current_drawdown
-                trough_idx = i
+            if running_peak > 0:
+                current_drawdown = (running_peak - prices[i]) / running_peak
+                if current_drawdown > max_drawdown:
+                    max_drawdown = current_drawdown
+                    best_peak_idx = running_peak_idx
+                    best_trough_idx = i
 
-        # Calculate recovery
+        # Calculate recovery: find when price returns to the peak level after the trough
         recovery_days = None
-        if trough_idx < len(prices) - 1:
-            # Check if price recovered to peak level
-            for i in range(trough_idx + 1, len(prices)):
-                if prices[i] >= peak_price:
+        peak_level = prices[best_peak_idx]
+        if best_trough_idx < len(prices) - 1:
+            for i in range(best_trough_idx + 1, len(prices)):
+                if prices[i] >= peak_level:
                     try:
-                        start_date = datetime.strptime(dates[trough_idx], '%Y-%m-%d')
-                        end_date = datetime.strptime(dates[i], '%Y-%m-%d')
-                        recovery_days = (end_date - start_date).days
+                        trough_date = datetime.strptime(dates[best_trough_idx], '%Y-%m-%d')
+                        recovery_date = datetime.strptime(dates[i], '%Y-%m-%d')
+                        recovery_days = (recovery_date - trough_date).days
                     except ValueError:
                         recovery_days = None
                     break
 
         return {
             'value': max_drawdown * 100,
-            'date_peak': dates[peak_idx] if peak_idx < len(dates) else None,
-            'date_trough': dates[trough_idx] if trough_idx < len(dates) else None,
+            'date_peak': dates[best_peak_idx] if best_peak_idx < len(dates) else None,
+            'date_trough': dates[best_trough_idx] if best_trough_idx < len(dates) else None,
             'recovery_days': recovery_days
         }
 
@@ -250,28 +257,33 @@ class QuantAnalyzer:
             'interpretation': interpretation
         }
 
-    def calculate_relative_strength(self, prices: List[float], benchmark_prices: Optional[List[float]]) -> Dict[str, Any]:
+    def calculate_relative_strength(self, prices: List[float], dates: List[str],
+                                     benchmark_prices: Optional[List[float]]) -> Dict[str, Any]:
         """Calculate relative strength vs benchmark."""
-        if not benchmark_prices or len(prices) < 2 or len(benchmark_prices) < 2:
+        if not benchmark_prices or len(prices) < 2 or len(benchmark_prices) < 2 or len(dates) < 2:
             return {
                 'vs_benchmark': None,
-                'outperformance': None
+                'outperformance': None,
+                'note': 'Insufficient data or no benchmark available'
             }
 
-        stock_ret, _ = self.calculate_annualized_return(prices, ['2020-01-01'] * len(prices))
-        bench_ret, _ = self.calculate_annualized_return(benchmark_prices, ['2020-01-01'] * len(benchmark_prices))
+        # Use actual dates for annualized return calculation
+        min_len = min(len(prices), len(benchmark_prices), len(dates))
+        stock_ret, _ = self.calculate_annualized_return(prices[-min_len:], dates[-min_len:])
+        bench_ret, _ = self.calculate_annualized_return(benchmark_prices[-min_len:], dates[-min_len:])
 
         if stock_ret is None or bench_ret is None:
             return {
                 'vs_benchmark': None,
-                'outperformance': None
+                'outperformance': None,
+                'note': 'Could not calculate annualized returns'
             }
 
         relative_strength = stock_ret - bench_ret
         outperformance = relative_strength > 0
 
         return {
-            'vs_benchmark': relative_strength,
+            'vs_benchmark': round(relative_strength, 2),
             'outperformance': outperformance
         }
 
@@ -383,6 +395,60 @@ class QuantAnalyzer:
             'recommendation': recommendation
         }
 
+    @staticmethod
+    def _infer_benchmark(ticker: str) -> Optional[str]:
+        """Infer the appropriate market benchmark for a given ticker."""
+        t = ticker.upper()
+        if t.endswith('.TW') or t.endswith('.TWO'):
+            return '^TWII'       # TAIEX
+        elif t.endswith('.T'):
+            return '^N225'       # Nikkei 225
+        elif t.endswith('.HK'):
+            return '^HSI'        # Hang Seng
+        elif t.endswith('.L'):
+            return '^FTSE'       # FTSE 100
+        else:
+            return '^GSPC'       # S&P 500 (default for US stocks)
+
+    @staticmethod
+    def _fetch_benchmark_prices(benchmark_ticker: str, dates: List[str]) -> Optional[List[float]]:
+        """Fetch benchmark closing prices aligned with the stock's date range."""
+        try:
+            import yfinance as yf
+            if not dates or len(dates) < 2:
+                return None
+
+            start = datetime.strptime(dates[0], '%Y-%m-%d') - timedelta(days=5)
+            end = datetime.strptime(dates[-1], '%Y-%m-%d') + timedelta(days=1)
+
+            bench = yf.Ticker(benchmark_ticker)
+            hist = bench.history(start=start, end=end)
+
+            if hist.empty or len(hist) < 2:
+                return None
+
+            # Align to stock dates as closely as possible
+            bench_prices = []
+            bench_dates_idx = {d.strftime('%Y-%m-%d'): row['Close'] for d, row in hist.iterrows()}
+            available_dates = sorted(bench_dates_idx.keys())
+
+            for d in dates:
+                if d in bench_dates_idx:
+                    bench_prices.append(float(bench_dates_idx[d]))
+                else:
+                    # Use nearest previous available date
+                    prev = [ad for ad in available_dates if ad <= d]
+                    if prev:
+                        bench_prices.append(float(bench_dates_idx[prev[-1]]))
+                    elif bench_prices:
+                        bench_prices.append(bench_prices[-1])
+
+            return bench_prices if len(bench_prices) >= 2 else None
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch benchmark {benchmark_ticker}: {e}")
+            return None
+
     def analyze(self, input_path: str, output_path: str):
         """Main analysis workflow."""
         try:
@@ -395,14 +461,26 @@ class QuantAnalyzer:
             prices, dates = self.extract_prices(data)
             returns = self.calculate_returns(prices)
 
+            # Fetch benchmark for Beta calculation
+            benchmark_ticker = self._infer_benchmark(ticker)
+            benchmark_prices = None
+            benchmark_name = 'N/A'
+            if benchmark_ticker:
+                logger.info(f"Fetching benchmark {benchmark_ticker} for Beta calculation...")
+                benchmark_prices = self._fetch_benchmark_prices(benchmark_ticker, dates)
+                if benchmark_prices:
+                    benchmark_name = benchmark_ticker
+
             # Calculate metrics
             annualized_return, period_days = self.calculate_annualized_return(prices, dates)
             volatility = self.calculate_volatility(prices)
             sharpe = self.calculate_sharpe_ratio(prices)
             sortino = self.calculate_sortino_ratio(prices)
-            beta = self.calculate_beta(prices, None)  # No benchmark in this version
+            beta = self.calculate_beta(prices, benchmark_prices)
+            if beta.get('value') is not None:
+                beta['benchmark'] = benchmark_name
             drawdown = self.calculate_maximum_drawdown(prices, dates)
-            rel_strength = self.calculate_relative_strength(prices, None)
+            rel_strength = self.calculate_relative_strength(prices, dates, benchmark_prices)
             scenarios = self.scenario_analysis(prices, volatility)
 
             # Data quality and confidence

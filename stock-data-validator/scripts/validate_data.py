@@ -1,421 +1,655 @@
 #!/usr/bin/env python3
 """
 Stock Data Validator Script
-Validates raw stock data against quality thresholds and assigns confidence scores.
+Validates raw stock data from fetch_data.py against quality thresholds
+and assigns confidence scores.
+
+Expects the NESTED structure output by fetch_data.py:
+  metadata, company_info, price_history[], technical_indicators,
+  financial_statements, news[], holders, analyst_data
 """
 
 import json
 import argparse
+import math
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Optional, Tuple
 import sys
 
 
 class StockDataValidator:
     """Validates stock data and assigns confidence scores."""
 
-    # Validation thresholds
-    PRICE_FRESHNESS_MINUTES = 15
-    FINANCIAL_FRESHNESS_DAYS = 90
+    # --- Validation thresholds ---
+    PRICE_FRESHNESS_DAYS = 3          # Daily data; 3 calendar days covers weekends
+    FINANCIAL_FRESHNESS_DAYS = 120    # Quarterly financials can be up to ~4 months old
     NEWS_FRESHNESS_DAYS = 30
+    PE_MIN = 0
     PE_MAX = 500
-    SINGLE_DAY_CHANGE_LIMIT = 0.20  # 20%
-    EPS_GROWTH_LIMIT = 3.0  # 300%
-    CROSS_SOURCE_TOLERANCE = 0.02  # 2%
+    PB_MIN = 0
+    PB_MAX = 100
+    SINGLE_DAY_CHANGE_LIMIT = 0.20   # 20%
+    EPS_GROWTH_LIMIT = 3.0           # 300%
+    VOLUME_SPIKE_RATIO = 5.0         # 500% of average
+    MIN_PRICE_RECORDS = 20           # Minimum price history records for meaningful analysis
     MIN_CONFIDENCE_PASS = 50
 
     def __init__(self):
-        self.anomalies = []
-        self.validation_notes = []
-        self.excluded_fields = []
+        self.anomalies: List[Dict[str, Any]] = []
+        self.validation_notes: List[str] = []
+        self.excluded_fields: List[Dict[str, Any]] = []
 
     def validate_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Main validation pipeline.
 
         Args:
-            raw_data: Raw data dictionary from data fetcher
+            raw_data: Raw data dictionary from fetch_data.py (nested structure)
 
         Returns:
-            Validated data package with confidence scores
+            Validated data package with confidence scores and anomaly reports
         """
         self.anomalies = []
         self.validation_notes = []
         self.excluded_fields = []
 
-        ticker = raw_data.get('ticker', 'UNKNOWN')
+        metadata = raw_data.get("metadata", {})
+        ticker = metadata.get("ticker", "UNKNOWN")
 
-        # Step 1: Freshness check
-        freshness_results = self._check_freshness(raw_data)
+        # Step 1: Structural completeness check
+        completeness = self._check_completeness(raw_data, metadata)
 
-        # Step 2: Cross-source comparison
-        cross_source_results = self._cross_source_comparison(raw_data)
+        # Step 2: Freshness check
+        freshness = self._check_freshness(raw_data)
 
-        # Step 3: Anomaly detection
-        self._detect_anomalies(raw_data)
+        # Step 3: Price data integrity
+        price_integrity = self._validate_price_data(raw_data.get("price_history", []))
 
-        # Step 4: Calculate confidence scores
-        data_confidence = self._calculate_data_confidence(
-            freshness_results,
-            cross_source_results
+        # Step 4: Company info anomaly detection
+        self._detect_company_info_anomalies(raw_data.get("company_info", {}))
+
+        # Step 5: Financial statements sanity check
+        self._validate_financial_statements(raw_data.get("financial_statements", {}))
+
+        # Step 6: Technical indicators range check
+        self._validate_technical_indicators(raw_data.get("technical_indicators", {}))
+
+        # Step 7: Calculate confidence scores per category
+        confidence_scores = self._calculate_confidence_scores(
+            completeness, freshness, price_integrity
         )
-        overall_confidence = self._calculate_overall_confidence(data_confidence)
+        overall_confidence = self._calculate_overall_confidence(confidence_scores)
 
-        # Step 5: Build validated package
-        validated_package = {
-            'ticker': ticker,
-            'validation_timestamp': datetime.now().isoformat(),
-            'data_freshness': freshness_results,
-            'cross_source_check': cross_source_results,
-            'anomaly_detection': self.anomalies,
-            'confidence_scores': data_confidence,
-            'overall_confidence': overall_confidence,
-            'validated_data': self._build_validated_data(raw_data, data_confidence),
-            'excluded_fields': self.excluded_fields,
-            'validation_notes': self.validation_notes,
-            'passed_validation': overall_confidence >= self.MIN_CONFIDENCE_PASS
+        # Step 8: Build validated data (pass-through with annotations)
+        validated_data = self._build_validated_data(raw_data, confidence_scores)
+
+        return {
+            "ticker": ticker,
+            "validation_timestamp": datetime.now().isoformat(),
+            "data_completeness": completeness,
+            "data_freshness": freshness,
+            "price_integrity": price_integrity,
+            "anomaly_detection": self.anomalies,
+            "confidence_scores": confidence_scores,
+            "overall_confidence": overall_confidence,
+            "validated_data": validated_data,
+            "excluded_fields": self.excluded_fields,
+            "validation_notes": self.validation_notes,
+            "passed_validation": overall_confidence >= self.MIN_CONFIDENCE_PASS
         }
 
-        return validated_package
+    # ------------------------------------------------------------------
+    # Step 1: Structural completeness
+    # ------------------------------------------------------------------
+    def _check_completeness(self, data: Dict, metadata: Dict) -> Dict[str, Any]:
+        """Check which data sections are present and non-empty."""
+        missing_from_api = metadata.get("missing_data", [])
 
-    def _check_freshness(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        sections = {
+            "company_info": bool(data.get("company_info")),
+            "price_history": bool(data.get("price_history")),
+            "technical_indicators": bool(data.get("technical_indicators")),
+            "financial_statements": self._has_financial_data(data.get("financial_statements", {})),
+            "holders": bool(data.get("holders")),
+            "analyst_data": bool(data.get("analyst_data")),
+            "twse_institutional": bool(data.get("twse_data", {}).get("institutional_trading")),
+            "twse_margin": bool(data.get("twse_data", {}).get("margin_trading")),
+        }
+
+        present_count = sum(1 for v in sections.values() if v)
+        total_count = len(sections)
+        completeness_pct = round(present_count / total_count * 100, 1)
+
+        missing_sections = [k for k, v in sections.items() if not v]
+        if missing_sections:
+            self.validation_notes.append(
+                f"Missing data sections: {', '.join(missing_sections)}"
+            )
+
+        if missing_from_api:
+            self.validation_notes.append(
+                f"API reported missing: {', '.join(missing_from_api)}"
+            )
+
+        return {
+            "sections": sections,
+            "present": present_count,
+            "total": total_count,
+            "completeness_pct": completeness_pct,
+            "api_reported_missing": missing_from_api,
+        }
+
+    @staticmethod
+    def _has_financial_data(fs: Dict) -> bool:
+        """Check if financial statements have actual data."""
+        for stmt_type in ("income_statement", "balance_sheet", "cash_flow"):
+            stmt = fs.get(stmt_type, {})
+            if isinstance(stmt, dict) and len(stmt) > 0:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Step 2: Freshness
+    # ------------------------------------------------------------------
+    def _check_freshness(self, data: Dict) -> Dict[str, Any]:
         """Check freshness of different data categories."""
         now = datetime.now()
-        freshness = {}
+        freshness: Dict[str, Any] = {}
 
-        # Price data freshness
-        if 'price_timestamp' in data:
-            price_time = datetime.fromisoformat(data['price_timestamp'])
-            age_minutes = (now - price_time).total_seconds() / 60
-            freshness['price'] = {
-                'timestamp': data['price_timestamp'],
-                'age_minutes': round(age_minutes, 2),
-                'fresh': age_minutes < self.PRICE_FRESHNESS_MINUTES,
-                'max_age_minutes': self.PRICE_FRESHNESS_MINUTES
-            }
-            if age_minutes >= self.PRICE_FRESHNESS_MINUTES:
-                self.validation_notes.append(
-                    f"Price data is {age_minutes:.1f} minutes old (threshold: {self.PRICE_FRESHNESS_MINUTES}min)"
-                )
-
-        # Financial data freshness
-        if 'financial_timestamp' in data:
-            fin_time = datetime.fromisoformat(data['financial_timestamp'])
-            age_days = (now - fin_time).days
-            freshness['financial'] = {
-                'timestamp': data['financial_timestamp'],
-                'age_days': age_days,
-                'fresh': age_days < self.FINANCIAL_FRESHNESS_DAYS,
-                'max_age_days': self.FINANCIAL_FRESHNESS_DAYS
-            }
-            if age_days >= self.FINANCIAL_FRESHNESS_DAYS:
-                self.validation_notes.append(
-                    f"Financial data is {age_days} days old (threshold: {self.FINANCIAL_FRESHNESS_DAYS}d)"
-                )
-
-        # News data freshness
-        if 'news' in data and isinstance(data['news'], list) and len(data['news']) > 0:
-            oldest_news_time = None
-            for news_item in data['news']:
-                if 'timestamp' in news_item:
-                    try:
-                        news_time = datetime.fromisoformat(news_item['timestamp'])
-                        if oldest_news_time is None or news_time < oldest_news_time:
-                            oldest_news_time = news_time
-                    except ValueError:
-                        pass
-
-            if oldest_news_time:
-                age_days = (now - oldest_news_time).days
-                freshness['news'] = {
-                    'oldest_timestamp': oldest_news_time.isoformat(),
-                    'age_days': age_days,
-                    'fresh': age_days < self.NEWS_FRESHNESS_DAYS,
-                    'max_age_days': self.NEWS_FRESHNESS_DAYS
+        # -- Fetch timestamp --
+        fetch_ts = data.get("metadata", {}).get("fetch_timestamp")
+        if fetch_ts:
+            try:
+                ft = datetime.fromisoformat(fetch_ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                age_hours = (now - ft).total_seconds() / 3600
+                freshness["fetch"] = {
+                    "timestamp": fetch_ts,
+                    "age_hours": round(age_hours, 2),
+                    "fresh": age_hours < 24,
                 }
-                if age_days >= self.NEWS_FRESHNESS_DAYS:
+                if age_hours >= 24:
                     self.validation_notes.append(
-                        f"Oldest news item is {age_days} days old (threshold: {self.NEWS_FRESHNESS_DAYS}d)"
+                        f"Data was fetched {age_hours:.1f} hours ago (>24h)"
                     )
+            except (ValueError, TypeError):
+                freshness["fetch"] = {"timestamp": fetch_ts, "error": "unparseable timestamp"}
+
+        # -- Price data freshness (last record date vs today) --
+        price_history = data.get("price_history", [])
+        if price_history:
+            last_date_str = price_history[-1].get("date") if isinstance(price_history[-1], dict) else None
+            if last_date_str:
+                try:
+                    last_date = datetime.strptime(last_date_str, "%Y-%m-%d")
+                    age_days = (now - last_date).days
+                    freshness["price"] = {
+                        "last_date": last_date_str,
+                        "age_days": age_days,
+                        "fresh": age_days <= self.PRICE_FRESHNESS_DAYS,
+                        "max_age_days": self.PRICE_FRESHNESS_DAYS,
+                    }
+                    if age_days > self.PRICE_FRESHNESS_DAYS:
+                        self.validation_notes.append(
+                            f"Latest price data is {age_days} days old "
+                            f"(threshold: {self.PRICE_FRESHNESS_DAYS}d)"
+                        )
+                except ValueError:
+                    pass
+
+        # -- Financial statements freshness --
+        fs = data.get("financial_statements", {})
+        latest_fin_date = self._get_latest_financial_date(fs)
+        if latest_fin_date:
+            age_days = (now - latest_fin_date).days
+            freshness["financial"] = {
+                "latest_date": latest_fin_date.strftime("%Y-%m-%d"),
+                "age_days": age_days,
+                "fresh": age_days <= self.FINANCIAL_FRESHNESS_DAYS,
+                "max_age_days": self.FINANCIAL_FRESHNESS_DAYS,
+            }
+            if age_days > self.FINANCIAL_FRESHNESS_DAYS:
+                self.validation_notes.append(
+                    f"Financial data is {age_days} days old "
+                    f"(threshold: {self.FINANCIAL_FRESHNESS_DAYS}d)"
+                )
+
+        # -- News freshness --
+        news = data.get("news", [])
+        if news:
+            newest_date = self._get_newest_news_date(news)
+            if newest_date:
+                age_days = (now - newest_date).days
+                freshness["news"] = {
+                    "newest_date": newest_date.isoformat(),
+                    "age_days": age_days,
+                    "fresh": age_days <= self.NEWS_FRESHNESS_DAYS,
+                    "max_age_days": self.NEWS_FRESHNESS_DAYS,
+                }
 
         return freshness
 
-    def _cross_source_comparison(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Compare data across multiple sources."""
-        results = {'sources': {}, 'aligned': True, 'alignment_issues': []}
+    @staticmethod
+    def _get_latest_financial_date(fs: Dict) -> Optional[datetime]:
+        """Extract the most recent date from financial statements."""
+        dates = []
+        for stmt_type in ("income_statement", "balance_sheet", "cash_flow"):
+            stmt = fs.get(stmt_type, {})
+            if isinstance(stmt, dict):
+                for date_str in stmt.keys():
+                    try:
+                        dates.append(datetime.strptime(date_str, "%Y-%m-%d"))
+                    except ValueError:
+                        continue
+        return max(dates) if dates else None
 
-        if 'sources' not in data:
-            return results
-
-        sources = data['sources']
-        if not isinstance(sources, dict):
-            return results
-
-        # Compare price across sources
-        prices = {}
-        for source, source_data in sources.items():
-            if isinstance(source_data, dict) and 'price' in source_data:
-                prices[source] = source_data['price']
-
-        if len(prices) >= 2:
-            price_list = list(prices.values())
-            max_price = max(price_list)
-            min_price = min(price_list)
-            tolerance = max_price * self.CROSS_SOURCE_TOLERANCE
-
-            if (max_price - min_price) > tolerance:
-                results['aligned'] = False
-                results['alignment_issues'].append({
-                    'metric': 'price',
-                    'sources': prices,
-                    'max_diff_pct': round(((max_price - min_price) / min_price * 100), 2),
-                    'tolerance_pct': round(self.CROSS_SOURCE_TOLERANCE * 100, 2)
-                })
-                self.validation_notes.append(
-                    f"Price discrepancy between sources: {round(((max_price - min_price) / min_price * 100), 2)}% "
-                    f"(tolerance: {round(self.CROSS_SOURCE_TOLERANCE * 100, 2)}%)"
-                )
-
-        results['sources'] = prices
-        return results
-
-    def _detect_anomalies(self, data: Dict[str, Any]):
-        """Detect anomalies in the data."""
-
-        # PE ratio check
-        if 'pe_ratio' in data and data['pe_ratio'] is not None:
-            pe = float(data['pe_ratio'])
-            if pe < 0 or pe > self.PE_MAX:
-                self.anomalies.append({
-                    'type': 'pe_ratio_anomaly',
-                    'value': pe,
-                    'acceptable_range': f"0 to {self.PE_MAX}",
-                    'severity': 'high'
-                })
-
-        # EPS growth check
-        if 'eps_current' in data and 'eps_previous' in data:
-            eps_curr = data['eps_current']
-            eps_prev = data['eps_previous']
-            if eps_prev and eps_prev != 0:
+    @staticmethod
+    def _get_newest_news_date(news: List[Dict]) -> Optional[datetime]:
+        """Get the newest news article date."""
+        dates = []
+        for item in news:
+            pd_str = item.get("publish_date")
+            if pd_str:
                 try:
-                    growth = abs((eps_curr - eps_prev) / eps_prev)
-                    if growth > self.EPS_GROWTH_LIMIT:
-                        self.anomalies.append({
-                            'type': 'eps_growth_anomaly',
-                            'growth_rate': round(growth, 2),
-                            'threshold': self.EPS_GROWTH_LIMIT,
-                            'current_eps': eps_curr,
-                            'previous_eps': eps_prev,
-                            'severity': 'medium'
-                        })
-                except (TypeError, ValueError):
-                    pass
+                    dates.append(datetime.fromisoformat(pd_str))
+                except (ValueError, TypeError):
+                    continue
+        return max(dates) if dates else None
 
-        # Single-day price change check
-        if 'price' in data and 'price_previous' in data:
-            price = data['price']
-            price_prev = data['price_previous']
-            if price_prev and price_prev > 0:
-                try:
-                    change = abs((price - price_prev) / price_prev)
-                    if change > self.SINGLE_DAY_CHANGE_LIMIT:
-                        self.anomalies.append({
-                            'type': 'price_spike',
-                            'change_pct': round(change * 100, 2),
-                            'threshold_pct': round(self.SINGLE_DAY_CHANGE_LIMIT * 100, 2),
-                            'current_price': price,
-                            'previous_price': price_prev,
-                            'severity': 'medium'
-                        })
-                except (TypeError, ValueError):
-                    pass
-
-        # Currency consistency check
-        if 'currency' in data:
-            currency = data['currency']
-            for key in ['price', 'market_cap', 'volume_value']:
-                if key in data and data[key] is not None:
-                    # Just note that we have the currency
-                    pass
-
-        # Volume anomaly check
-        if 'volume' in data and 'volume_average' in data:
-            vol = data['volume']
-            vol_avg = data['volume_average']
-            if vol_avg and vol_avg > 0:
-                try:
-                    vol_ratio = vol / vol_avg
-                    if vol_ratio > 5.0:  # 500% of average
-                        self.anomalies.append({
-                            'type': 'volume_anomaly',
-                            'volume_ratio': round(vol_ratio, 2),
-                            'threshold': 5.0,
-                            'current_volume': vol,
-                            'average_volume': vol_avg,
-                            'severity': 'low'
-                        })
-                except (TypeError, ValueError):
-                    pass
-
-    def _calculate_data_confidence(self, freshness: Dict, cross_source: Dict) -> Dict[str, int]:
-        """Calculate confidence scores for each data category."""
-        confidence = {}
-
-        # Price confidence
-        price_conf = 85  # Base
-        if 'price' in freshness:
-            if freshness['price']['fresh']:
-                price_conf = 95
-            else:
-                price_conf -= 20
-
-        # Check cross-source alignment
-        if not cross_source.get('aligned', True):
-            price_conf -= 15
-
-        # Check for price anomalies
-        for anomaly in self.anomalies:
-            if anomaly['type'] == 'price_spike':
-                price_conf -= 25
-
-        confidence['price'] = max(0, min(100, price_conf))
-
-        # Financial confidence
-        fin_conf = 80  # Base
-        if 'financial' in freshness:
-            if freshness['financial']['fresh']:
-                fin_conf = 90
-            else:
-                fin_conf -= 30
-
-        for anomaly in self.anomalies:
-            if anomaly['type'] in ['pe_ratio_anomaly', 'eps_growth_anomaly']:
-                fin_conf -= 20
-
-        confidence['financial'] = max(0, min(100, fin_conf))
-
-        # News confidence
-        news_conf = 70  # Base
-        if 'news' in freshness:
-            if freshness['news']['fresh']:
-                news_conf = 85
-            else:
-                news_conf -= 15
-
-        confidence['news'] = max(0, min(100, news_conf))
-
-        # Volume confidence
-        vol_conf = 75  # Base
-        for anomaly in self.anomalies:
-            if anomaly['type'] == 'volume_anomaly':
-                vol_conf -= 10
-
-        confidence['volume'] = max(0, min(100, vol_conf))
-
-        return confidence
-
-    def _calculate_overall_confidence(self, data_confidence: Dict[str, int]) -> int:
-        """Calculate overall confidence score."""
-        if not data_confidence:
-            return 50
-
-        # Weight the categories
-        weights = {
-            'price': 0.4,
-            'financial': 0.35,
-            'news': 0.15,
-            'volume': 0.1
+    # ------------------------------------------------------------------
+    # Step 3: Price data integrity
+    # ------------------------------------------------------------------
+    def _validate_price_data(self, price_history: List[Dict]) -> Dict[str, Any]:
+        """Validate price history records for integrity."""
+        result = {
+            "total_records": len(price_history),
+            "sufficient": len(price_history) >= self.MIN_PRICE_RECORDS,
+            "null_prices": 0,
+            "negative_prices": 0,
+            "large_daily_moves": [],
+            "date_gaps": [],
         }
 
-        overall = 0
-        for category, weight in weights.items():
-            if category in data_confidence:
-                overall += data_confidence[category] * weight
+        if len(price_history) < self.MIN_PRICE_RECORDS:
+            self.validation_notes.append(
+                f"Only {len(price_history)} price records "
+                f"(minimum recommended: {self.MIN_PRICE_RECORDS})"
+            )
 
-        # Penalty for anomalies
-        if self.anomalies:
-            high_severity = sum(1 for a in self.anomalies if a.get('severity') == 'high')
-            overall -= high_severity * 15
+        prev_close = None
+        prev_date = None
+        volumes = []
 
-        return max(0, min(100, int(overall)))
+        for i, record in enumerate(price_history):
+            close = record.get("close")
+            volume = record.get("volume")
+            date_str = record.get("date")
 
+            # Null check
+            if close is None:
+                result["null_prices"] += 1
+                continue
+
+            # Negative check
+            if close < 0:
+                result["negative_prices"] += 1
+                self.anomalies.append({
+                    "type": "negative_price",
+                    "date": date_str,
+                    "value": close,
+                    "severity": "high",
+                })
+                continue
+
+            # Large daily move check
+            if prev_close and prev_close > 0:
+                change = abs(close - prev_close) / prev_close
+                if change > self.SINGLE_DAY_CHANGE_LIMIT:
+                    result["large_daily_moves"].append({
+                        "date": date_str,
+                        "change_pct": round(change * 100, 2),
+                        "from": prev_close,
+                        "to": close,
+                    })
+                    self.anomalies.append({
+                        "type": "price_spike",
+                        "date": date_str,
+                        "change_pct": round(change * 100, 2),
+                        "threshold_pct": self.SINGLE_DAY_CHANGE_LIMIT * 100,
+                        "severity": "medium",
+                    })
+
+            # Date gap check
+            if prev_date and date_str:
+                try:
+                    d1 = datetime.strptime(prev_date, "%Y-%m-%d")
+                    d2 = datetime.strptime(date_str, "%Y-%m-%d")
+                    gap = (d2 - d1).days
+                    if gap > 7:  # More than a week gap (holidays can cause 4-5 day gaps)
+                        result["date_gaps"].append({
+                            "from": prev_date,
+                            "to": date_str,
+                            "gap_days": gap,
+                        })
+                except ValueError:
+                    pass
+
+            if volume is not None and volume > 0:
+                volumes.append(volume)
+
+            prev_close = close
+            prev_date = date_str
+
+        # Volume spike check
+        if volumes:
+            avg_volume = sum(volumes) / len(volumes)
+            last_volume = volumes[-1] if volumes else 0
+            if avg_volume > 0 and last_volume / avg_volume > self.VOLUME_SPIKE_RATIO:
+                self.anomalies.append({
+                    "type": "volume_anomaly",
+                    "volume_ratio": round(last_volume / avg_volume, 2),
+                    "threshold": self.VOLUME_SPIKE_RATIO,
+                    "latest_volume": last_volume,
+                    "average_volume": round(avg_volume),
+                    "severity": "low",
+                })
+            result["avg_volume"] = round(avg_volume)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Step 4: Company info anomalies
+    # ------------------------------------------------------------------
+    def _detect_company_info_anomalies(self, info: Dict) -> None:
+        """Detect anomalies in company info values."""
+        if not info:
+            return
+
+        # PE ratio
+        pe = info.get("pe_ratio")
+        if pe is not None:
+            if pe < self.PE_MIN or pe > self.PE_MAX:
+                self.anomalies.append({
+                    "type": "pe_ratio_anomaly",
+                    "value": pe,
+                    "acceptable_range": f"{self.PE_MIN} to {self.PE_MAX}",
+                    "severity": "high" if pe < 0 else "medium",
+                })
+            elif pe < 0:
+                self.anomalies.append({
+                    "type": "negative_pe",
+                    "value": pe,
+                    "note": "Negative PE indicates losses; data is valid but flag for analysts",
+                    "severity": "medium",
+                })
+
+        # PB ratio
+        pb = info.get("pb_ratio")
+        if pb is not None and (pb < self.PB_MIN or pb > self.PB_MAX):
+            self.anomalies.append({
+                "type": "pb_ratio_anomaly",
+                "value": pb,
+                "acceptable_range": f"{self.PB_MIN} to {self.PB_MAX}",
+                "severity": "medium",
+            })
+
+        # Dividend yield sanity (>20% is suspicious)
+        # yfinance returns dividend_yield in different formats: decimal (0.0472) or pct (4.72)
+        dy = info.get("dividend_yield")
+        if dy is not None and dy > 20.0:  # If >20, treat as percentage and flag
+            self.anomalies.append({
+                "type": "dividend_yield_anomaly",
+                "value": dy,
+                "note": "Dividend yield >20% is unusual; verify data",
+                "severity": "medium",
+            })
+
+        # ROE sanity
+        roe = info.get("return_on_equity")
+        if roe is not None and (roe > 2.0 or roe < -2.0):
+            self.anomalies.append({
+                "type": "roe_anomaly",
+                "value": roe,
+                "note": "ROE >200% or <-200% is unusual",
+                "severity": "low",
+            })
+
+        # Debt-to-equity
+        dte = info.get("debt_to_equity")
+        if dte is not None and dte > 500:
+            self.anomalies.append({
+                "type": "high_leverage",
+                "value": dte,
+                "note": "Debt/Equity >500% — highly leveraged",
+                "severity": "medium",
+            })
+
+        # Market cap should be positive
+        mcap = info.get("market_cap")
+        if mcap is not None and mcap <= 0:
+            self.anomalies.append({
+                "type": "invalid_market_cap",
+                "value": mcap,
+                "severity": "high",
+            })
+
+    # ------------------------------------------------------------------
+    # Step 5: Financial statements sanity
+    # ------------------------------------------------------------------
+    def _validate_financial_statements(self, fs: Dict) -> None:
+        """Basic sanity checks on financial statement data."""
+        if not fs:
+            return
+
+        # Check income statement for negative revenue (unusual but possible for special cases)
+        income = fs.get("income_statement", {})
+        for date_str, items in income.items():
+            if not isinstance(items, dict):
+                continue
+            total_revenue = items.get("Total Revenue") or items.get("TotalRevenue")
+            if total_revenue is not None and total_revenue < 0:
+                self.anomalies.append({
+                    "type": "negative_revenue",
+                    "date": date_str,
+                    "value": total_revenue,
+                    "severity": "medium",
+                })
+
+    # ------------------------------------------------------------------
+    # Step 6: Technical indicators range check
+    # ------------------------------------------------------------------
+    def _validate_technical_indicators(self, indicators: Dict) -> None:
+        """Validate technical indicator values are in expected ranges."""
+        if not indicators:
+            return
+
+        # RSI should be 0-100
+        rsi_data = indicators.get("rsi_14", {})
+        rsi_val = rsi_data.get("value") if isinstance(rsi_data, dict) else None
+        if rsi_val is not None and (rsi_val < 0 or rsi_val > 100):
+            self.anomalies.append({
+                "type": "rsi_out_of_range",
+                "value": rsi_val,
+                "expected_range": "0 to 100",
+                "severity": "high",
+            })
+
+        # Stochastic K/D should be 0-100
+        kd_data = indicators.get("stochastic_kd", {})
+        for key in ("k_percent", "d_percent"):
+            val = kd_data.get(key) if isinstance(kd_data, dict) else None
+            if val is not None and (val < 0 or val > 100):
+                self.anomalies.append({
+                    "type": f"stochastic_{key}_out_of_range",
+                    "value": val,
+                    "expected_range": "0 to 100",
+                    "severity": "high",
+                })
+
+    # ------------------------------------------------------------------
+    # Step 7: Confidence scoring
+    # ------------------------------------------------------------------
+    def _calculate_confidence_scores(
+        self,
+        completeness: Dict,
+        freshness: Dict,
+        price_integrity: Dict,
+    ) -> Dict[str, int]:
+        """Calculate confidence scores for each data category (0-100)."""
+        scores: Dict[str, int] = {}
+
+        # --- Price confidence ---
+        price_conf = 70  # Base
+        if price_integrity.get("sufficient"):
+            price_conf += 15
+        if freshness.get("price", {}).get("fresh"):
+            price_conf += 10
+        # Penalties
+        price_conf -= len(price_integrity.get("large_daily_moves", [])) * 5
+        price_conf -= price_integrity.get("null_prices", 0) * 2
+        price_conf -= price_integrity.get("negative_prices", 0) * 10
+        for a in self.anomalies:
+            if a["type"] == "volume_anomaly":
+                price_conf -= 5
+        scores["price"] = max(0, min(100, price_conf))
+
+        # --- Financial confidence ---
+        fin_conf = 60  # Base
+        if completeness["sections"].get("company_info"):
+            fin_conf += 15
+        if completeness["sections"].get("financial_statements"):
+            fin_conf += 10
+        if freshness.get("financial", {}).get("fresh"):
+            fin_conf += 10
+        for a in self.anomalies:
+            if a["type"] in ("pe_ratio_anomaly", "negative_pe", "pb_ratio_anomaly",
+                             "negative_revenue", "high_leverage", "invalid_market_cap"):
+                fin_conf -= 10
+        scores["financial"] = max(0, min(100, fin_conf))
+
+        # --- Technical indicator confidence ---
+        tech_conf = 70
+        if completeness["sections"].get("technical_indicators"):
+            tech_conf += 15
+        for a in self.anomalies:
+            if "out_of_range" in a.get("type", ""):
+                tech_conf -= 20
+        scores["technical"] = max(0, min(100, tech_conf))
+
+        # --- Holders / analyst confidence ---
+        holder_conf = 50
+        if completeness["sections"].get("holders"):
+            holder_conf += 15
+        if completeness["sections"].get("analyst_data"):
+            holder_conf += 15
+        # TWSE data bonus for Taiwan stocks
+        if completeness["sections"].get("twse_institutional"):
+            holder_conf += 10
+        if completeness["sections"].get("twse_margin"):
+            holder_conf += 10
+        scores["institutional"] = max(0, min(100, holder_conf))
+
+        return scores
+
+    def _calculate_overall_confidence(self, scores: Dict[str, int]) -> int:
+        """Weighted average of category confidence scores."""
+        weights = {
+            "price": 0.30,
+            "financial": 0.30,
+            "technical": 0.20,
+            "institutional": 0.20,
+        }
+
+        total = 0.0
+        for cat, weight in weights.items():
+            total += scores.get(cat, 50) * weight
+
+        # Penalty for high-severity anomalies
+        high_count = sum(1 for a in self.anomalies if a.get("severity") == "high")
+        total -= high_count * 10
+
+        return max(0, min(100, int(total)))
+
+    # ------------------------------------------------------------------
+    # Step 9: Build validated data
+    # ------------------------------------------------------------------
     def _build_validated_data(self, raw_data: Dict, confidence: Dict) -> Dict[str, Any]:
-        """Build the validated data subset, excluding low-confidence fields."""
+        """
+        Build the validated data package.
+        Pass through all data but annotate with validation metadata.
+        Low-confidence sections get flagged but are NOT removed —
+        downstream agents need the data and can decide how to weight it.
+        """
         validated = {}
 
-        for key, value in raw_data.items():
-            if key in ['ticker', 'price_timestamp', 'financial_timestamp', 'price', 'pe_ratio',
-                      'eps_current', 'eps_previous', 'volume', 'volume_average', 'currency']:
-                # Check if this field passes confidence threshold
-                field_category = self._get_field_category(key)
-                field_confidence = confidence.get(field_category, 100)
+        # Pass through all sections from raw_data
+        for key in ("metadata", "company_info", "price_history", "technical_indicators",
+                     "financial_statements", "holders", "analyst_data", "twse_data"):
+            validated[key] = raw_data.get(key, {})
 
-                if field_confidence >= self.MIN_CONFIDENCE_PASS:
-                    validated[key] = value
-                else:
-                    self.excluded_fields.append({
-                        'field': key,
-                        'confidence': field_confidence,
-                        'threshold': self.MIN_CONFIDENCE_PASS
-                    })
-            else:
-                # Include non-scored fields
-                validated[key] = value
+        # Add validation annotations
+        validated["_validation"] = {
+            "confidence_scores": confidence,
+            "anomaly_count": len(self.anomalies),
+            "high_severity_anomalies": sum(
+                1 for a in self.anomalies if a.get("severity") == "high"
+            ),
+            "low_confidence_sections": [
+                k for k, v in confidence.items() if v < self.MIN_CONFIDENCE_PASS
+            ],
+        }
 
         return validated
-
-    def _get_field_category(self, field: str) -> str:
-        """Determine which category a field belongs to."""
-        if field in ['price', 'price_timestamp', 'price_previous']:
-            return 'price'
-        elif field in ['pe_ratio', 'eps_current', 'eps_previous', 'financial_timestamp']:
-            return 'financial'
-        elif field == 'volume' or field == 'volume_average':
-            return 'volume'
-        else:
-            return 'news'
 
 
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description='Validate stock data and assign confidence scores'
+        description="Validate stock data and assign confidence scores"
     )
-    parser.add_argument(
-        '--input',
-        required=True,
-        help='Input raw data JSON file'
-    )
-    parser.add_argument(
-        '--output',
-        required=True,
-        help='Output validated data JSON file'
-    )
+    parser.add_argument("--input", required=True, help="Input raw data JSON file")
+    parser.add_argument("--output", required=True, help="Output validated data JSON file")
 
     args = parser.parse_args()
 
     # Read raw data
     try:
-        with open(args.input, 'r', encoding='utf-8') as f:
+        with open(args.input, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"Error reading input file: {e}", file=sys.stderr)
+    except FileNotFoundError:
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"Error: Invalid JSON in input file: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Validate
     validator = StockDataValidator()
     validated_package = validator.validate_data(raw_data)
 
+    # Summary output
+    overall = validated_package["overall_confidence"]
+    anomaly_count = len(validated_package["anomaly_detection"])
+    passed = validated_package["passed_validation"]
+
+    print(f"=== Validation Report for {validated_package['ticker']} ===")
+    print(f"  Overall Confidence: {overall}/100 {'PASSED' if passed else 'FAILED'}")
+    print(f"  Anomalies Detected: {anomaly_count}")
+    print(f"  Data Completeness:  {validated_package['data_completeness']['completeness_pct']}%")
+
+    if validated_package["validation_notes"]:
+        print(f"  Notes:")
+        for note in validated_package["validation_notes"]:
+            print(f"    - {note}")
+
     # Write output
     try:
-        with open(args.output, 'w', encoding='utf-8') as f:
+        with open(args.output, "w", encoding="utf-8") as f:
             json.dump(validated_package, f, indent=2, ensure_ascii=False)
-        print(f"Validation complete. Output written to {args.output}")
+        print(f"\nValidated data written to: {args.output}")
     except IOError as e:
         print(f"Error writing output file: {e}", file=sys.stderr)
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
