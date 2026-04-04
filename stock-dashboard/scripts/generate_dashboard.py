@@ -47,32 +47,43 @@ def get_score_color(score):
         return '#c0392b'
 
 
-def load_logo_base64():
-    """Load Fubon logo as base64 data URI."""
-    logo_path = Path(__file__).parent.parent / 'assets' / 'fubon-logo.png'
-    if logo_path.exists():
-        b64 = base64.b64encode(logo_path.read_bytes()).decode('utf-8')
-        return f'data:image/png;base64,{b64}'
-    return ''
+# --- Base64 asset cache (computed once per process, reused across calls) ---
+_base64_cache = {}
 
+def _load_and_cache_base64(cache_key: str, file_path: Path) -> str:
+    """Load a file as base64 data URI, with in-memory caching."""
+    if cache_key in _base64_cache:
+        return _base64_cache[cache_key]
+    if file_path.exists():
+        b64 = base64.b64encode(file_path.read_bytes()).decode('utf-8')
+        result = f'data:image/png;base64,{b64}'
+    else:
+        result = ''
+    _base64_cache[cache_key] = result
+    return result
+
+
+def load_logo_base64():
+    """Load Fubon logo as base64 data URI (cached)."""
+    logo_path = Path(__file__).parent.parent / 'assets' / 'fubon-logo.png'
+    return _load_and_cache_base64('logo', logo_path)
+
+
+# Map analyst keys to avatar filenames
+_AVATAR_MAP = {
+    'financial_analyst': 'financial',
+    'technical_analyst': 'technical',
+    'quantitative_analyst': 'quant',
+    'industry_macro': 'industry',
+    'news_sentiment': 'sentiment',
+    'institutional_flow': 'institutional',
+}
 
 def load_avatar_base64(name):
-    """Load analyst avatar as base64 data URI."""
-    # Map analyst keys to avatar filenames
-    avatar_map = {
-        'financial_analyst': 'financial',
-        'technical_analyst': 'technical',
-        'quantitative_analyst': 'quant',
-        'industry_macro': 'industry',
-        'news_sentiment': 'sentiment',
-        'institutional_flow': 'institutional',
-    }
-    filename = avatar_map.get(name, name)
+    """Load analyst avatar as base64 data URI (cached)."""
+    filename = _AVATAR_MAP.get(name, name)
     avatar_path = Path(__file__).parent.parent / 'assets' / 'avatars' / f'{filename}.png'
-    if avatar_path.exists():
-        b64 = base64.b64encode(avatar_path.read_bytes()).decode('utf-8')
-        return f'data:image/png;base64,{b64}'
-    return ''
+    return _load_and_cache_base64(f'avatar_{filename}', avatar_path)
 
 
 def generate_sparkline_svg(prices, width=120, height=32):

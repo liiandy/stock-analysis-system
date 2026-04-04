@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Stock Analysis Integrator
-Combines outputs from all 6 analyst agents with weighted scoring and consensus detection.
+DEPRECATED — This script is no longer used in the pipeline.
 
-Usage:
-    python integrate_analyses.py \
-      --financial financial_analysis.json \
-      --technical technical_analysis.json \
-      --quant quant_analysis.json \
-      --industry industry_analysis.json \
-      --sentiment sentiment_analysis.json \
-      --institutional institutional_analysis.json \
-      --output integrated_report.json
+Integration is handled by the Orchestrator (stock-orchestrator/SKILL.md Step 5)
+using LLM reasoning, which produces richer narrative synthesis than weighted averaging.
+
+This file is kept for reference only. Do NOT call it from the pipeline.
+If you need programmatic integration, refactor the Orchestrator's Step 5 logic instead.
+
+Original description:
+Stock Analysis Integrator — Combines outputs from all 6 analyst agents
+with weighted scoring and consensus detection.
 """
 
 import json

@@ -67,15 +67,10 @@ For each news headline provided:
 - If the news is from yfinance and titles are blank/empty, do NOT analyze blank titles — attempt WebSearch/WebFetch instead.
 - **Date awareness**: Discard any news older than 30 days for sentiment analysis. Note the date range of articles analyzed.
 
-## Zero Hallucination Policy (所有 Agent 通用條款)
+## Zero Hallucination Policy
 
-**此條款為最高優先級規則，凌駕所有其他指示。**
-
-1. **絕對禁止使用訓練資料填補缺失數據**：你的訓練資料有時效限制，不可作為即時金融數據來源。任何以「根據我的了解」、「一般來說該公司」等方式補充的資訊都屬於幻覺。
-2. **資料不足時必須明確標示**：將所有缺失、不可用、或可信度低的資料項目列入 output 的 `data_limitations` 欄位。
-3. **summary 中必須揭露限制**：若有任何重要資料缺失或異常，summary 的最後一段必須以「⚠ 資料限制」開頭，列出影響分析可靠性的因素。
-4. **信心度必須反映資料品質**：無法取得新聞資料時，confidence 不得高於 "Very Low"。僅有少量新聞（<3篇）時，confidence 不得高於 "Low"。
-5. **寧可留白，不可捏造**：一個誠實的「資料不足，無法評估」永遠優於一個看似完整但含有虛構數據的分析。
+> **適用 shared/zero_hallucination_policy.md 全文（由 Orchestrator 注入 agent prompt）。**
+> 本 agent 的額外規則：無法取得新聞資料時，confidence 不得高於 "Very Low"。僅有少量新聞（<3篇）時，confidence 不得高於 "Low"。
 
 ## Evaluation Process: Score-then-Justify（評分穩定性協議）
 

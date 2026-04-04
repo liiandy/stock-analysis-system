@@ -115,24 +115,35 @@ fi
 - If result is **`CACHE_HIT`** and mode is `selective`: Continue anyway (selective analysis may cover different dimensions than cached full report).
 - If result is `CACHE_MISS_STALE` or `CACHE_MISS_NONE`: Continue to Step 2.
 
-### Step 2: Fetch & Validate Data (Python scripts)
-Run these two commands sequentially via Bash:
+### Step 2: Fetch & Validate Data (single combined script)
+Run the combined fetch-and-validate script. This saves one Python cold-start and one JSON round-trip:
 
 ```bash
-python {{SKILLS_DIR}}/stock-data-fetcher/scripts/fetch_data.py {TICKER} --output {{OUTPUT_DIR}}/{name}/raw_data.json
-python {{SKILLS_DIR}}/stock-data-validator/scripts/validate_data.py --input {{OUTPUT_DIR}}/{name}/raw_data.json --output {{OUTPUT_DIR}}/{name}/validated_data.json
+python {{SKILLS_DIR}}/stock-data-fetcher/scripts/fetch_and_validate.py {TICKER} \
+  --output {{OUTPUT_DIR}}/{name}/validated_data.json \
+  --raw-output {{OUTPUT_DIR}}/{name}/raw_data.json
 ```
 
-If either fails, report the error and stop.
+- Exit code 0 = success (passed or warning tier)
+- Exit code 2 = **hard stop** (confidence < 30%, data too unreliable) — report to user and stop
+- Exit code 1 = script error — report the error and stop
 
-### Step 3: Read Validated Data & Quality Gate
-Use the Read tool to read `validated_data.json`. **Before proceeding, check these quality gates:**
+**Note**: The fetch script now uses parallel API calls internally (ThreadPoolExecutor), so data fetching is ~2-3x faster than before.
 
-1. **`passed_validation`** must be `true` (overall confidence >= 50). If `false`, report the validation failures to the user and stop.
-2. **Review `validation_notes`** — report any warnings to the user (e.g., stale data, missing sections, anomalies).
-3. **Review `anomaly_detection`** — if there are `high` severity anomalies, warn the user that analysis reliability may be reduced.
-4. **Check `data_completeness.completeness_pct`** — if below 60%, warn the user about missing data sections.
-5. **Check `confidence_scores`** per category — if any category scores below 50, note that the corresponding analyst's output should be weighted lower.
+### Step 3: Read Validated Data & Tiered Quality Gate
+Use the Read tool to read `validated_data.json`. **Check the `validation_tier` field first:**
+
+| `validation_tier` | Action |
+|---|---|
+| `"hard_stop"` | Confidence < 30%. **Report failures to user and STOP.** Do not launch agents. |
+| `"warning"` | Confidence 30-49%. **Warn user** that data quality is low, then proceed with reduced confidence expectations. |
+| `"passed"` | Confidence >= 50%. Proceed normally. |
+
+**Additional checks (for `warning` and `passed` tiers):**
+1. **Review `validation_notes`** — report any warnings to the user (e.g., stale data, missing sections, anomalies).
+2. **Review `anomaly_detection`** — if there are `high` severity anomalies, warn the user that analysis reliability may be reduced.
+3. **Check `data_completeness.completeness_pct`** — if below 60%, warn the user about missing data sections.
+4. **Check `confidence_scores`** per category — if any category scores below 50, note that the corresponding analyst's output should be weighted lower.
 
 Then extract the key data points from `validated_data.validated_data` (the nested structure):
 - Company info (name, sector, industry, market cap, PE, PB, EPS, ROE, margins, currency, current_price, etc.)
@@ -169,10 +180,41 @@ Then reply to the user in natural language (繁體中文), for example:
 
 ---
 
+### Step 3.5: Pre-launch Quant Script (parallel with Step 4)
+
+If the quantitative analyst is among the active agents, start `analyze_quant.py` **immediately** via Bash with `run_in_background: true` — it runs in parallel with all other agents:
+
+```bash
+python {{SKILLS_DIR}}/stock-quant-analyst/scripts/analyze_quant.py \
+  --input {{OUTPUT_DIR}}/{name}/validated_data.json \
+  --output {{OUTPUT_DIR}}/{name}/quant_analysis.json
+```
+
+Do NOT wait for this to finish before launching agents. The Quant Agent will receive the result when it completes.
+
+### Step 3.8: Agent-Level Cache Check
+
+Before launching each agent, check if a **same-day** analysis already exists:
+
+```bash
+TODAY=$(date +%Y-%m-%d)
+for f in financial_analysis.json technical_analysis.json quant_analysis.json \
+         industry_analysis.json sentiment_analysis.json institutional_analysis.json; do
+  FPATH="{{OUTPUT_DIR}}/{name}/$f"
+  if [ -f "$FPATH" ]; then
+    FILE_DATE=$(stat -f '%Sm' -t '%Y-%m-%d' "$FPATH" 2>/dev/null)
+    [ "$FILE_DATE" = "$TODAY" ] && echo "CACHED:$f"
+  fi
+done
+```
+
+- For any `CACHED:{file}`, **skip launching that agent** — reuse the existing JSON.
+- This is especially useful when transitioning from selective → full analysis on the same stock.
+
 ### Step 4: Launch Analyst Agents
 
-**If mode is `full_analysis`**: Launch all 6 agents in parallel (original behavior).
-**If mode is `selective`**: Launch ONLY the agents identified in Step 1. Still use the Agent tool in parallel for all selected agents.
+**If mode is `full_analysis`**: Launch all 6 agents in parallel (minus any cached from Step 3.8).
+**If mode is `selective`**: Launch ONLY the agents identified in Step 1 (minus cached).
 
 For both modes, use the **Agent tool** to launch agents in parallel. Each agent receives:
 1. The role description from its SKILL.md
@@ -189,7 +231,7 @@ Sub-agents running in background cannot reliably write files (permission issues)
 The 6 analysts (launch all for `full_analysis`, or only the selected ones for `selective`):
 1. **Financial Analyst** — Fundamental analysis (profitability, valuation, financial structure, dividends)
 2. **Technical Analyst** — Price action analysis (trend, support/resistance, momentum indicators)
-3. **Quantitative Analyst** — First run `python {{SKILLS_DIR}}/stock-quant-analyst/scripts/analyze_quant.py --input {validated_data} --output {output_dir}/quant_analysis.json`, then interpret the results
+3. **Quantitative Analyst** — Interpret the pre-calculated metrics from `quant_analysis.json` (launched in Step 3.5). If the script hasn't finished yet, wait for it before providing data to the Quant Agent.
 4. **Industry & Macro Analyst** — Sector positioning, competitive landscape, macro environment
 5. **News Sentiment Analyst** — News sentiment classification, major events, sentiment trends. **News is NOT in validated_data.** The agent must independently collect news via WebSearch → WebFetch → neutral fallback. **Must include `sources` array with URL for every article analyzed.** The agent must NEVER use training data / memory as a news source.
 6. **Institutional Flow Analyst** — Ownership structure, analyst consensus, smart money signals. **For Taiwan stocks**: Include TWSE institutional trading data (三大法人買賣超) and margin trading data (融資融券) from `validated_data.twse_data`.
@@ -197,7 +239,9 @@ The 6 analysts (launch all for `full_analysis`, or only the selected ones for `s
 **IMPORTANT**: For each agent prompt, include the actual data values from validated_data.json so the agent can reason about them. Don't just tell the agent to "read the file" — provide the data inline.
 
 **CRITICAL — Zero Hallucination Directive (傳達給每個 agent)**:
-Every agent prompt MUST include this instruction block verbatim:
+Every agent prompt MUST include the full text of `shared/zero_hallucination_policy.md` (read it once, then paste into each agent prompt). This replaces the previous per-agent duplicated blocks. Additionally, append the agent-specific confidence rule from each agent's SKILL.md.
+
+Compact version for prompt injection (if context is tight):
 > 你必須遵守 Zero Hallucination Policy：(1) 絕對禁止使用訓練資料填補缺失數據 (2) 所有缺失或不確定的資料必須列入 data_limitations 欄位 (3) summary 最後一段必須以「⚠ 資料限制」揭露不足之處 (4) 寧可留白不可捏造。data_limitations 為必填欄位。
 
 Each agent must return its JSON analysis in its response. **Every agent output must include a `data_limitations` array field.**

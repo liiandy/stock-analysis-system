@@ -20,24 +20,47 @@ import sys
 class StockDataValidator:
     """Validates stock data and assigns confidence scores."""
 
-    # --- Validation thresholds ---
-    PRICE_FRESHNESS_DAYS = 3          # Daily data; 3 calendar days covers weekends
-    FINANCIAL_FRESHNESS_DAYS = 120    # Quarterly financials can be up to ~4 months old
-    NEWS_FRESHNESS_DAYS = 30
-    PE_MIN = 0
-    PE_MAX = 500
-    PB_MIN = 0
-    PB_MAX = 100
-    SINGLE_DAY_CHANGE_LIMIT = 0.20   # 20%
-    EPS_GROWTH_LIMIT = 3.0           # 300%
-    VOLUME_SPIKE_RATIO = 5.0         # 500% of average
-    MIN_PRICE_RECORDS = 20           # Minimum price history records for meaningful analysis
-    MIN_CONFIDENCE_PASS = 50
+    # --- Default validation thresholds ---
+    DEFAULT_THRESHOLDS = {
+        "price_freshness_days": 3,          # Daily data; 3 calendar days covers weekends
+        "financial_freshness_days": 120,    # Quarterly financials can be up to ~4 months old
+        "news_freshness_days": 30,
+        "pe_min": 0,
+        "pe_max": 500,
+        "pb_min": 0,
+        "pb_max": 100,
+        "single_day_change_limit": 0.20,    # 20%
+        "eps_growth_limit": 3.0,            # 300%
+        "volume_spike_ratio": 5.0,          # 500% of average
+        "min_price_records": 20,            # Minimum price history records
+        "min_confidence_pass": 50,          # Overall confidence threshold to pass
+        "hard_stop_confidence": 30,         # Below this: abort analysis entirely
+    }
 
-    def __init__(self):
+    # --- Market-specific threshold overrides ---
+    MARKET_OVERRIDES = {
+        "TW": {                             # Taiwan stocks: 10% daily limit
+            "single_day_change_limit": 0.11,
+        },
+        "TWO": {                            # Taiwan OTC: same limit
+            "single_day_change_limit": 0.11,
+        },
+        "T": {                              # Japan stocks
+            "single_day_change_limit": 0.20,
+        },
+    }
+
+    def __init__(self, thresholds: Optional[Dict[str, Any]] = None, market: Optional[str] = None):
         self.anomalies: List[Dict[str, Any]] = []
         self.validation_notes: List[str] = []
         self.excluded_fields: List[Dict[str, Any]] = []
+
+        # Build thresholds: defaults → market overrides → user overrides
+        self.thresholds = dict(self.DEFAULT_THRESHOLDS)
+        if market and market in self.MARKET_OVERRIDES:
+            self.thresholds.update(self.MARKET_OVERRIDES[market])
+        if thresholds:
+            self.thresholds.update(thresholds)
 
     def validate_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -83,6 +106,16 @@ class StockDataValidator:
         # Step 8: Build validated data (pass-through with annotations)
         validated_data = self._build_validated_data(raw_data, confidence_scores)
 
+        # Tiered validation gate
+        hard_stop = self.thresholds["hard_stop_confidence"]
+        soft_pass = self.thresholds["min_confidence_pass"]
+        if overall_confidence < hard_stop:
+            validation_tier = "hard_stop"    # Abort: data too unreliable
+        elif overall_confidence < soft_pass:
+            validation_tier = "warning"      # Proceed with caution, warn user
+        else:
+            validation_tier = "passed"       # Good to go
+
         return {
             "ticker": ticker,
             "validation_timestamp": datetime.now().isoformat(),
@@ -95,7 +128,9 @@ class StockDataValidator:
             "validated_data": validated_data,
             "excluded_fields": self.excluded_fields,
             "validation_notes": self.validation_notes,
-            "passed_validation": overall_confidence >= self.MIN_CONFIDENCE_PASS
+            "passed_validation": overall_confidence >= soft_pass,
+            "validation_tier": validation_tier,
+            "thresholds_used": self.thresholds,
         }
 
     # ------------------------------------------------------------------
@@ -185,13 +220,14 @@ class StockDataValidator:
                     freshness["price"] = {
                         "last_date": last_date_str,
                         "age_days": age_days,
-                        "fresh": age_days <= self.PRICE_FRESHNESS_DAYS,
-                        "max_age_days": self.PRICE_FRESHNESS_DAYS,
+                        "fresh": age_days <= self.thresholds["price_freshness_days"],
+                        "max_age_days": self.thresholds["price_freshness_days"],
                     }
-                    if age_days > self.PRICE_FRESHNESS_DAYS:
+                    thresh = self.thresholds["price_freshness_days"]
+                    if age_days > thresh:
                         self.validation_notes.append(
                             f"Latest price data is {age_days} days old "
-                            f"(threshold: {self.PRICE_FRESHNESS_DAYS}d)"
+                            f"(threshold: {thresh}d)"
                         )
                 except ValueError:
                     pass
@@ -204,13 +240,14 @@ class StockDataValidator:
             freshness["financial"] = {
                 "latest_date": latest_fin_date.strftime("%Y-%m-%d"),
                 "age_days": age_days,
-                "fresh": age_days <= self.FINANCIAL_FRESHNESS_DAYS,
-                "max_age_days": self.FINANCIAL_FRESHNESS_DAYS,
+                "fresh": age_days <= self.thresholds["financial_freshness_days"],
+                "max_age_days": self.thresholds["financial_freshness_days"],
             }
-            if age_days > self.FINANCIAL_FRESHNESS_DAYS:
+            fin_thresh = self.thresholds["financial_freshness_days"]
+            if age_days > fin_thresh:
                 self.validation_notes.append(
                     f"Financial data is {age_days} days old "
-                    f"(threshold: {self.FINANCIAL_FRESHNESS_DAYS}d)"
+                    f"(threshold: {fin_thresh}d)"
                 )
 
         # -- News freshness --
@@ -222,8 +259,8 @@ class StockDataValidator:
                 freshness["news"] = {
                     "newest_date": newest_date.isoformat(),
                     "age_days": age_days,
-                    "fresh": age_days <= self.NEWS_FRESHNESS_DAYS,
-                    "max_age_days": self.NEWS_FRESHNESS_DAYS,
+                    "fresh": age_days <= self.thresholds["news_freshness_days"],
+                    "max_age_days": self.thresholds["news_freshness_days"],
                 }
 
         return freshness
@@ -262,17 +299,18 @@ class StockDataValidator:
         """Validate price history records for integrity."""
         result = {
             "total_records": len(price_history),
-            "sufficient": len(price_history) >= self.MIN_PRICE_RECORDS,
+            "sufficient": len(price_history) >= self.thresholds["min_price_records"],
             "null_prices": 0,
             "negative_prices": 0,
             "large_daily_moves": [],
             "date_gaps": [],
         }
 
-        if len(price_history) < self.MIN_PRICE_RECORDS:
+        min_records = self.thresholds["min_price_records"]
+        if len(price_history) < min_records:
             self.validation_notes.append(
                 f"Only {len(price_history)} price records "
-                f"(minimum recommended: {self.MIN_PRICE_RECORDS})"
+                f"(minimum recommended: {min_records})"
             )
 
         prev_close = None
@@ -303,7 +341,7 @@ class StockDataValidator:
             # Large daily move check
             if prev_close and prev_close > 0:
                 change = abs(close - prev_close) / prev_close
-                if change > self.SINGLE_DAY_CHANGE_LIMIT:
+                if change > self.thresholds["single_day_change_limit"]:
                     result["large_daily_moves"].append({
                         "date": date_str,
                         "change_pct": round(change * 100, 2),
@@ -314,7 +352,7 @@ class StockDataValidator:
                         "type": "price_spike",
                         "date": date_str,
                         "change_pct": round(change * 100, 2),
-                        "threshold_pct": self.SINGLE_DAY_CHANGE_LIMIT * 100,
+                        "threshold_pct": self.thresholds["single_day_change_limit"] * 100,
                         "severity": "medium",
                     })
 
@@ -343,11 +381,11 @@ class StockDataValidator:
         if volumes:
             avg_volume = sum(volumes) / len(volumes)
             last_volume = volumes[-1] if volumes else 0
-            if avg_volume > 0 and last_volume / avg_volume > self.VOLUME_SPIKE_RATIO:
+            if avg_volume > 0 and last_volume / avg_volume > self.thresholds["volume_spike_ratio"]:
                 self.anomalies.append({
                     "type": "volume_anomaly",
                     "volume_ratio": round(last_volume / avg_volume, 2),
-                    "threshold": self.VOLUME_SPIKE_RATIO,
+                    "threshold": self.thresholds["volume_spike_ratio"],
                     "latest_volume": last_volume,
                     "average_volume": round(avg_volume),
                     "severity": "low",
@@ -366,12 +404,13 @@ class StockDataValidator:
 
         # PE ratio
         pe = info.get("pe_ratio")
+        pe_min, pe_max = self.thresholds["pe_min"], self.thresholds["pe_max"]
         if pe is not None:
-            if pe < self.PE_MIN or pe > self.PE_MAX:
+            if pe < pe_min or pe > pe_max:
                 self.anomalies.append({
                     "type": "pe_ratio_anomaly",
                     "value": pe,
-                    "acceptable_range": f"{self.PE_MIN} to {self.PE_MAX}",
+                    "acceptable_range": f"{pe_min} to {pe_max}",
                     "severity": "high" if pe < 0 else "medium",
                 })
             elif pe < 0:
@@ -384,11 +423,12 @@ class StockDataValidator:
 
         # PB ratio
         pb = info.get("pb_ratio")
-        if pb is not None and (pb < self.PB_MIN or pb > self.PB_MAX):
+        pb_min, pb_max = self.thresholds["pb_min"], self.thresholds["pb_max"]
+        if pb is not None and (pb < pb_min or pb > pb_max):
             self.anomalies.append({
                 "type": "pb_ratio_anomaly",
                 "value": pb,
-                "acceptable_range": f"{self.PB_MIN} to {self.PB_MAX}",
+                "acceptable_range": f"{pb_min} to {pb_max}",
                 "severity": "medium",
             })
 
@@ -594,11 +634,18 @@ class StockDataValidator:
                 1 for a in self.anomalies if a.get("severity") == "high"
             ),
             "low_confidence_sections": [
-                k for k, v in confidence.items() if v < self.MIN_CONFIDENCE_PASS
+                k for k, v in confidence.items() if v < self.thresholds["min_confidence_pass"]
             ],
         }
 
         return validated
+
+
+def _detect_market(ticker: str) -> Optional[str]:
+    """Detect market suffix from ticker (e.g. '2330.TW' → 'TW')."""
+    if '.' in ticker:
+        return ticker.rsplit('.', 1)[-1].upper()
+    return None
 
 
 def main():
@@ -608,6 +655,8 @@ def main():
     )
     parser.add_argument("--input", required=True, help="Input raw data JSON file")
     parser.add_argument("--output", required=True, help="Output validated data JSON file")
+    parser.add_argument("--config", default=None,
+                        help="Optional JSON config file with threshold overrides")
 
     args = parser.parse_args()
 
@@ -622,8 +671,21 @@ def main():
         print(f"Error: Invalid JSON in input file: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Load optional threshold overrides
+    custom_thresholds = None
+    if args.config:
+        try:
+            with open(args.config, "r", encoding="utf-8") as f:
+                custom_thresholds = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"Warning: Could not load config: {e}", file=sys.stderr)
+
+    # Auto-detect market from ticker
+    ticker = raw_data.get("metadata", {}).get("ticker", "")
+    market = _detect_market(ticker)
+
     # Validate
-    validator = StockDataValidator()
+    validator = StockDataValidator(thresholds=custom_thresholds, market=market)
     validated_package = validator.validate_data(raw_data)
 
     # Summary output
@@ -631,8 +693,10 @@ def main():
     anomaly_count = len(validated_package["anomaly_detection"])
     passed = validated_package["passed_validation"]
 
+    tier = validated_package["validation_tier"]
+    tier_label = {"passed": "PASSED", "warning": "WARNING (low confidence)", "hard_stop": "HARD STOP (abort)"}
     print(f"=== Validation Report for {validated_package['ticker']} ===")
-    print(f"  Overall Confidence: {overall}/100 {'PASSED' if passed else 'FAILED'}")
+    print(f"  Overall Confidence: {overall}/100 — {tier_label.get(tier, tier)}")
     print(f"  Anomalies Detected: {anomaly_count}")
     print(f"  Data Completeness:  {validated_package['data_completeness']['completeness_pct']}%")
 

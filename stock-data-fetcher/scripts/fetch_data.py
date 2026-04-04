@@ -18,6 +18,7 @@ import logging
 import sys
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -84,7 +85,7 @@ class StockDataFetcher:
 
     def fetch(self) -> Dict[str, Any]:
         """
-        Fetch all stock data.
+        Fetch all stock data using parallel API calls for maximum speed.
 
         Returns:
             Dictionary containing all fetched stock data
@@ -93,21 +94,40 @@ class StockDataFetcher:
             self.logger.info(f"Starting data fetch for ticker: {self.ticker}")
             self.data["metadata"]["fetch_timestamp"] = datetime.utcnow().isoformat() + "Z"
 
-            # Initialize yfinance ticker object
+            # Initialize yfinance ticker object (must be done first — shared by all fetchers)
             self._init_yfinance_ticker()
 
-            # Fetch data from various sources
-            self._fetch_company_info()
-            self._fetch_price_history()
-            self._fetch_financial_statements()
-            self._fetch_holders()
-            self._fetch_analyst_data()
-            self._calculate_technical_indicators()
+            # Phase 1: Parallel fetch — all independent API calls run concurrently
+            # price_history must complete before technical_indicators, so it's in phase 1
+            # and technical_indicators is calculated in phase 2.
+            parallel_tasks = {
+                "company_info": self._fetch_company_info,
+                "price_history": self._fetch_price_history,
+                "financial_statements": self._fetch_financial_statements,
+                "holders": self._fetch_holders,
+                "analyst_data": self._fetch_analyst_data,
+            }
 
-            # Fetch TWSE data for Taiwan-listed stocks
-            if self.ticker.endswith('.TW') or self.ticker.endswith('.TWO'):
-                self._fetch_twse_institutional()
-                self._fetch_twse_margin()
+            # Add TWSE tasks for Taiwan stocks
+            is_taiwan = self.ticker.endswith('.TW') or self.ticker.endswith('.TWO')
+            if is_taiwan:
+                parallel_tasks["twse_institutional"] = self._fetch_twse_institutional
+                parallel_tasks["twse_margin"] = self._fetch_twse_margin
+
+            with ThreadPoolExecutor(max_workers=len(parallel_tasks)) as executor:
+                futures = {
+                    executor.submit(fn): name
+                    for name, fn in parallel_tasks.items()
+                }
+                for future in as_completed(futures):
+                    task_name = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        self.logger.warning(f"Parallel task '{task_name}' failed: {e}")
+
+            # Phase 2: Calculate technical indicators (depends on price_history from phase 1)
+            self._calculate_technical_indicators()
 
             self.data["metadata"]["api_status"] = "success"
             self.logger.info(f"Successfully fetched data for {self.ticker}")
