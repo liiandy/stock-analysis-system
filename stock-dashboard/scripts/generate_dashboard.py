@@ -75,6 +75,30 @@ def load_avatar_base64(name):
     return ''
 
 
+def generate_sparkline_svg(prices, width=120, height=32):
+    """Generate an inline SVG sparkline from price data."""
+    if not prices or len(prices) < 2:
+        return ''
+    min_p, max_p = min(prices), max(prices)
+    price_range = max_p - min_p if max_p != min_p else 1
+    n = len(prices)
+    points = []
+    for i, p in enumerate(prices):
+        x = (i / (n - 1)) * width
+        y = height - ((p - min_p) / price_range) * (height - 4) - 2
+        points.append(f'{x:.1f},{y:.1f}')
+    polyline = ' '.join(points)
+    # Color: green if last > first, red if down
+    color = '#00805a' if prices[-1] >= prices[0] else '#c0392b'
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg" style="display:block">'
+        f'<polyline points="{polyline}" fill="none" stroke="{color}" '
+        f'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>'
+        f'</svg>'
+    )
+
+
 def generate_html_dashboard(integrated_report, validated_data):
     """Generate complete HTML dashboard from analysis data."""
 
@@ -122,6 +146,32 @@ def generate_html_dashboard(integrated_report, validated_data):
             'dividend_yield': f"{dy_raw:.2f}%" if dy_raw else 'N/A',
             'debt_ratio': f"{dte_raw:.1f}%" if dte_raw else 'N/A',
         }
+
+    # Extract price history for sparkline
+    price_history = validated_data.get('validated_data', {}).get('price_history', [])
+    if not price_history:
+        price_history = validated_data.get('price_history', [])
+    close_prices = []
+    for p in price_history:
+        if isinstance(p, dict) and p.get('close') is not None:
+            close_prices.append(float(p['close']))
+    # Take last 60 data points for sparkline
+    sparkline_data = close_prices[-60:] if close_prices else []
+    sparkline_svg = generate_sparkline_svg(sparkline_data)
+
+    # Price change info for sparkline badge
+    if sparkline_data and len(sparkline_data) >= 2:
+        last_price = sparkline_data[-1]
+        first_price = sparkline_data[0]
+        pct_change = ((last_price - first_price) / first_price) * 100
+        spark_price_str = f'{last_price:,.2f}'
+        spark_sign = '+' if pct_change >= 0 else ''
+        spark_change_str = f'{spark_sign}{pct_change:.1f}%'
+        spark_class = 'spark-up' if pct_change >= 0 else 'spark-down'
+    else:
+        spark_price_str = ''
+        spark_change_str = ''
+        spark_class = ''
 
     rating_color, rating_class, rating_cn, rating_en = get_rating_color(overall_score)
 
@@ -271,9 +321,14 @@ def generate_html_dashboard(integrated_report, validated_data):
         .brand-name{{font-size:20px;font-weight:700;letter-spacing:1px}}
         .brand-sub{{font-size:13px;font-weight:400;opacity:.6;letter-spacing:.5px}}
         .header-date{{font-size:12px;opacity:.6;letter-spacing:.3px}}
-        .header-stock{{display:flex;align-items:baseline;gap:10px;padding:2px 0 14px}}
+        .header-stock{{display:flex;align-items:center;gap:12px;padding:2px 0 14px}}
         .stock-name{{font-size:20px;font-weight:700;letter-spacing:.3px}}
         .stock-ticker{{font-size:13px;opacity:.55;font-weight:400}}
+        .sparkline-wrap{{display:flex;align-items:center;gap:8px;margin-left:4px;padding:3px 10px;background:rgba(255,255,255,.08);border-radius:4px}}
+        .sparkline-wrap .spark-price{{font-size:12px;opacity:.7;font-weight:500;white-space:nowrap}}
+        .sparkline-wrap .spark-change{{font-size:11px;font-weight:600;padding:1px 6px;border-radius:3px}}
+        .spark-up{{color:#4ade80;background:rgba(74,222,128,.12)}}
+        .spark-down{{color:#f87171;background:rgba(248,113,113,.12)}}
 
         .nav{{background:var(--navy-dark)}}
         .nav-inner{{max-width:1120px;margin:0 auto;padding:0 24px;display:flex;overflow-x:auto}}
@@ -377,6 +432,7 @@ def generate_html_dashboard(integrated_report, validated_data):
             <div class="header-stock">
                 <span class="stock-name">{company_name}</span>
                 <span class="stock-ticker">{ticker}</span>
+                {"" if not sparkline_svg else f'''<div class="sparkline-wrap">{sparkline_svg}<span class="spark-price">{spark_price_str}</span><span class="spark-change {spark_class}">{spark_change_str}</span></div>'''}
             </div>
         </div>
     </div>
