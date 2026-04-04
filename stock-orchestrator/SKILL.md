@@ -258,39 +258,29 @@ After all agents complete:
 2. **⚠ Use the Write tool to save ALL files in a single response message** — e.g., 6 Write tool calls in one message for 6 agents. Do NOT save them one-by-one in separate turns. This cuts 6 sequential writes into 1 parallel batch.
 3. **NEVER use Bash heredoc** to write these files — always use the Write tool to guarantee correct UTF-8 encoding.
 
-### Step 5: Integration — Synthesize Analyses
+### Step 5: Integration — Synthesize Analyses (LLM reasoning only)
 
-You already have all agent outputs from Step 4 (in-memory from agent responses). **Do NOT re-read the files you just wrote** — use the data you already extracted in Step 4.5.
+**Architecture**: The integration is split into two parts:
+1. **You (LLM)** produce a small `synthesis.json` (~3KB) containing ONLY the parts that need reasoning
+2. **`assemble_report.py` (Python script)** mechanically merges your synthesis with all agent outputs into the final `integrated_report.json` (~29KB)
 
-Then, using YOUR OWN reasoning as Claude, produce `integrated_report.json`. For `selective` mode, add these two extra fields at the top level:
-```json
-{
-  "mode": "selective",
-  "active_analysts": ["financial_analyst", "industry_macro"],
-  ...
-}
-```
-For `full_analysis` mode, add: `"mode": "full_analysis"` (or omit — dashboard treats missing mode as full).
+This is much faster because you don't need to generate/copy the 6 analysts' full summaries, sources, or metrics — the script handles that mechanically with zero errors.
 
-**Selective mode scoring rules**:
-- `dimension_scores`: Only include dimensions for active analysts. Omit the rest (do NOT fill with default 5.0).
-- `overall_score`: Weighted average using ONLY the active analysts. Re-normalize their weights to sum to 100%. For example, if only `financial_analyst` (25%) and `industry_macro` (20%) are active, their re-normalized weights are 55.6% and 44.4%.
-- `analysts`: Only include entries for active analysts.
-- `narrative_report`: Only write sections relevant to the active analysts. Omit irrelevant sections (e.g., skip `technical_analysis` if no technical analyst ran). Always include `investment_summary` and `data_limitations`.
-- `metrics`: Always include if data is available (comes from validated_data, not agents).
+#### Step 5a: Generate synthesis.json (Write tool)
 
-The full JSON structure is:
+You already have all agent data in memory from Step 4. Using YOUR OWN reasoning, produce `synthesis.json` with this structure:
 
 ```json
 {
+  "mode": "full_analysis",
+  "active_analysts": ["financial_analyst", "technical_analyst", "quantitative_analyst", "industry_macro", "news_sentiment", "institutional_flow"],
   "stock_info": {
     "ticker": "2317.TW",
     "company_name": "鴻海精密工業"
   },
   "overall_score": 7.5,
   "confidence_level": "High",
-  "summary": "One-paragraph investment summary in Chinese...",
-  "analysis_date": "2026-04-03",
+  "summary": "One-paragraph executive summary in Chinese...",
   "dimension_scores": {
     "fundamental": 8.0,
     "technical": 6.5,
@@ -300,57 +290,41 @@ The full JSON structure is:
     "fund_flow": 7.5
   },
   "analysts": {
-    "financial_analyst": {
-      "score": 8.0,
-      "confidence": "High",
-      "summary": "Detailed multi-line summary of financial analysis findings..."
-    },
-    "technical_analyst": { ... },
-    "quantitative_analyst": { ... },
-    "industry_macro": { ... },
-    "news_sentiment": {
-      "score": 6.0,
-      "confidence": "Medium",
-      "summary": "...",
-      "sources": [
-        {"title": "新聞標題", "url": "https://...", "publisher": "來源", "date": "2026-04-01", "source_type": "WebSearch"}
-      ]
-    },
-    "institutional_flow": { ... }
+    "quantitative_analyst": {
+      "summary": "量化分析師的完整摘要（繁體中文）...",
+      "confidence": "Medium"
+    }
   },
   "narrative_report": {
     "investment_summary": "2-3 paragraph investment thesis in Chinese...",
-    "fundamental_analysis": "Detailed fundamental analysis paragraph in Chinese...",
-    "technical_analysis": "Detailed technical analysis paragraph in Chinese...",
-    "risk_factors": "Key risk factors paragraph in Chinese...",
-    "investment_recommendation": "Clear actionable recommendation in Chinese...",
-    "data_limitations": "彙整所有分析師回報的資料限制，以條列方式呈現（繁體中文）"
-  },
-  "metrics": {
-    "pe_ratio": 12.5,
-    "pb_ratio": 1.8,
-    "eps": 10.25,
-    "roe": "22.5%",
-    "dividend_yield": "3.2%",
-    "debt_ratio": "45.2%"
+    "fundamental_analysis": "Detailed fundamental analysis paragraph...",
+    "technical_analysis": "Detailed technical analysis paragraph...",
+    "risk_factors": "Key risk factors paragraph...",
+    "investment_recommendation": "Clear actionable recommendation...",
+    "data_limitations": "彙整所有分析師回報的資料限制（自然語言段落）"
   },
   "data_limitations": [
-    "從各 agent 的 data_limitations 彙整而來的完整清單",
-    "每個 agent 回報的限制都必須保留，不可刪除或淡化"
+    "去重後的資料限制清單（條列式）"
   ]
 }
 ```
 
-**CRITICAL — 禁止截斷 analyst summary**：每位分析師的 `summary` 必須**完整複製**，不可截斷、省略或摘要化。若 summary 很長（例如產業分析師常有 5-8 段），仍必須全文保留。截斷會導致 dashboard 顯示不完整。
+**What goes in synthesis.json** (LLM reasoning required):
+- `overall_score` — weighted average of dimension scores
+- `confidence_level` — your assessment based on agent outputs
+- `summary` — executive summary synthesizing all agents
+- `dimension_scores` — you may adjust agent scores based on cross-analysis (e.g., if technical contradicts fundamental)
+- `analysts.quantitative_analyst` — the quant script outputs metrics only (no summary). You MUST provide `{"summary": "...", "confidence": "..."}` for the quant agent in synthesis. Other agents' summaries are copied from their JSONs automatically.
+- `narrative_report` — all sections, written in 繁體中文
+- `data_limitations` — **curated** list: deduplicate, remove limitations covered by other agents, keep genuine gaps
+- `stock_info.company_name` — translate to 繁體中文 (yfinance returns English)
 
-**news_sentiment 必須包含 `sources` 欄位**：從 sentiment agent 的 output 中複製完整的 `sources` 陣列到 `analysts.news_sentiment.sources`，dashboard 會用來顯示參考連結。
+**What the script handles automatically** (DO NOT include in synthesis.json):
+- `analysts.*` — score, confidence, summary, sources copied from agent JSONs
+- `metrics` — extracted from validated_data.json
+- `analysis_date` — today's date
 
-**data_limitations 去重與標註來源**：彙整各 agent 的 `data_limitations` 時：
-1. 若某限制已被其他分析師的工作涵蓋（例如量化分析師說「未納入法人籌碼」但法人籌碼分析師已分析），則標註「（此限制已由其他維度分析涵蓋）」或直接移除
-2. 若量化分析已獨立計算 Beta（透過回歸分析），則移除「Beta 未經獨立回歸驗證」之類的限制
-3. 保留所有無法被系統涵蓋的真實限制
-
-**company_name 必須使用繁體中文公司名稱**（例如「鴻海精密工業」而非 "Hon Hai Precision Industry Co., Ltd."）。yfinance 回傳的是英文名稱，你需要翻譯為正式的中文公司名。
+**Selective mode**: Set `"mode": "selective"` and only list active agents in `active_analysts`. Only include `dimension_scores` and `narrative_report` sections for active agents.
 
 **Scoring rules** (all scores are 0-10 scale):
 - 8-10: Strong Buy signal from this dimension
@@ -361,15 +335,33 @@ The full JSON structure is:
 
 **Confidence levels**: "Very High", "High", "Medium-High", "Medium", "Medium-Low", "Low"
 
-**All narrative_report content MUST be written in Traditional Chinese (繁體中文)**, providing professional investment-grade analysis.
+**All narrative_report content MUST be written in Traditional Chinese (繁體中文).**
 
-**Data Limitations Integration (必做)**:
-1. 讀取每個 agent output 的 `data_limitations` 欄位
-2. 彙整所有限制到 `integrated_report.data_limitations` 陣列（不可遺漏任何一條）
-3. 在 `narrative_report.data_limitations` 中以自然語言段落描述主要限制
-4. 若超過 3 個 agent 報告重大資料限制，整體 `confidence_level` 不得高於 "Medium"
+**Data Limitations rules**:
+1. Deduplicate across agents — remove limitations covered by other analysts' work
+2. If 3+ agents report major data limitations, `confidence_level` must not exceed "Medium"
+3. `narrative_report.data_limitations` = natural language prose; top-level `data_limitations` = array of strings
 
-**Writing integrated_report.json**: Use the **Write tool** to save the file. NEVER use Bash heredoc — it corrupts Chinese characters.
+Use the **Write tool** to save `synthesis.json` to `{{OUTPUT_DIR}}/{name}/synthesis.json`.
+
+#### Step 5b: Assemble integrated_report.json (Python script)
+
+Run the assembly script immediately after writing synthesis.json:
+
+```bash
+python {{SKILLS_DIR}}/stock-integrator/scripts/assemble_report.py \
+  --dir {{OUTPUT_DIR}}/{name} \
+  --synthesis {{OUTPUT_DIR}}/{name}/synthesis.json \
+  --output {{OUTPUT_DIR}}/{name}/integrated_report.json
+```
+
+The script:
+- Reads all 6 agent JSONs → copies full summaries, scores, confidence, sources (no truncation, no errors)
+- Reads validated_data.json → extracts pe_ratio, pb_ratio, eps, roe, dividend_yield, debt_ratio
+- Merges your synthesis (scores, narrative, limitations)
+- Outputs the complete `integrated_report.json`
+
+If the script fails, fall back to the old method (Write the full integrated_report.json directly).
 
 ### Step 6: Generate Dashboard (Python script)
 ```bash

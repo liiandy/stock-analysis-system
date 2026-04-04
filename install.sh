@@ -163,6 +163,7 @@ PLUGIN_PERMISSIONS = [
     f"Bash(python {skills_dir}/stock-data-fetcher/scripts/*)",
     f"Bash(python {skills_dir}/stock-data-validator/scripts/*)",
     f"Bash(python {skills_dir}/stock-quant-analyst/scripts/*)",
+    f"Bash(python {skills_dir}/stock-integrator/scripts/*)",
     f"Bash(python {skills_dir}/stock-dashboard/scripts/*)",
     f"Bash(open {output_dir}/*)",
 ]
