@@ -2,7 +2,7 @@
 #
 # 個人理財助理 — Claude Code Plugin Installer
 #
-# Usage: ./install.sh [--output-dir <path>]
+# Usage: ./install.sh [--output-dir <path>] [--auto-permissions]
 #
 # This script installs the stock analysis plugin so it can be used
 # from ANY directory in Claude Code. Just type "分析台積電" anywhere.
@@ -14,6 +14,8 @@ SKILLS_DIR="$HOME/.claude/skills"
 OUTPUT_DIR="$HOME/fubon-stock-reports"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$HOME/.claude/stock-analysis.conf"
+SETTINGS_FILE="$HOME/.claude/settings.json"
+AUTO_PERMISSIONS=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -22,11 +24,16 @@ while [[ $# -gt 0 ]]; do
       OUTPUT_DIR="$2"
       shift 2
       ;;
+    --auto-permissions)
+      AUTO_PERMISSIONS=true
+      shift
+      ;;
     --help|-h)
-      echo "Usage: ./install.sh [--output-dir <path>]"
+      echo "Usage: ./install.sh [--output-dir <path>] [--auto-permissions]"
       echo ""
       echo "Options:"
-      echo "  --output-dir  Custom output directory for reports (default: ~/fubon-stock-reports)"
+      echo "  --output-dir        Custom output directory for reports (default: ~/fubon-stock-reports)"
+      echo "  --auto-permissions  Skip permission prompt, auto-configure Claude Code permissions"
       exit 0
       ;;
     *)
@@ -51,6 +58,7 @@ SKILLS=(
   "stock-institutional-flow"
   "stock-integrator"
   "stock-dashboard"
+  "shared"
 )
 
 echo ""
@@ -93,6 +101,9 @@ for skill in "${SKILLS[@]}"; do
   fi
 done
 
+# Remove __pycache__ from installed skills
+find "$SKILLS_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
 # Step 4: Write config file
 cat > "$CONFIG_FILE" << EOF
 # 個人理財助理 — Configuration
@@ -104,11 +115,144 @@ cat > "$CONFIG_FILE" << EOF
 STOCK_ANALYSIS_SKILLS_DIR=$SKILLS_DIR
 STOCK_ANALYSIS_OUTPUT_DIR=$OUTPUT_DIR
 INSTALLED_FROM=$SCRIPT_DIR
+PERMISSIONS_CONFIGURED=false
 EOF
 echo ""
 echo "   ✓ Config saved to $CONFIG_FILE"
 
-# Step 5: Done
+# Step 5: Configure Claude Code permissions (ask once)
+configure_permissions() {
+  echo ""
+  echo "🔐 Configuring Claude Code permissions..."
+
+  # Build the permissions JSON array that this plugin needs
+  # Uses python3 to safely merge into existing settings.json
+  python3 << 'PYEOF'
+import json, sys, os
+
+settings_file = os.path.expanduser("~/.claude/settings.json")
+output_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/fubon-stock-reports")
+skills_dir = os.path.expanduser("~/.claude/skills")
+
+# Permissions required by this plugin
+PLUGIN_PERMISSIONS = [
+    # --- Read skills & config ---
+    f"Read(//{skills_dir}/**)",
+    # --- WebSearch (sentiment agent) ---
+    "WebSearch",
+    # --- WebFetch: Taiwan financial news ---
+    "WebFetch(domain:tw.stock.yahoo.com)",
+    "WebFetch(domain:finance.yahoo.com)",
+    "WebFetch(domain:news.google.com)",
+    "WebFetch(domain:www.businesstoday.com.tw)",
+    "WebFetch(domain:www.chinatimes.com)",
+    "WebFetch(domain:udn.com)",
+    "WebFetch(domain:money.udn.com)",
+    "WebFetch(domain:ec.ltn.com.tw)",
+    "WebFetch(domain:www.moneydj.com)",
+    "WebFetch(domain:www.cnyes.com)",
+    "WebFetch(domain:technews.tw)",
+    # --- WebFetch: International financial news ---
+    "WebFetch(domain:www.reuters.com)",
+    "WebFetch(domain:www.bloomberg.com)",
+    "WebFetch(domain:www.cnbc.com)",
+    "WebFetch(domain:seekingalpha.com)",
+    "WebFetch(domain:www.marketwatch.com)",
+    # --- Bash: plugin scripts (any ticker) ---
+    f"Bash(mkdir -p {output_dir}/*)",
+    f"Bash(python {skills_dir}/stock-data-fetcher/scripts/*)",
+    f"Bash(python {skills_dir}/stock-data-validator/scripts/*)",
+    f"Bash(python {skills_dir}/stock-quant-analyst/scripts/*)",
+    f"Bash(python {skills_dir}/stock-dashboard/scripts/*)",
+    f"Bash(open {output_dir}/*)",
+]
+
+# A marker so uninstall.sh can identify and remove these
+MARKER = "# __stock-analysis-plugin__"
+
+# Load existing settings or create new
+settings = {}
+if os.path.exists(settings_file):
+    try:
+        with open(settings_file, "r", encoding="utf-8") as f:
+            settings = json.load(f)
+    except (json.JSONDecodeError, IOError):
+        settings = {}
+
+perms = settings.setdefault("permissions", {})
+allow_list = perms.setdefault("allow", [])
+additional_dirs = perms.setdefault("additionalDirectories", [])
+
+# Remove any previously installed plugin permissions (idempotent reinstall)
+allow_list = [p for p in allow_list if not p.endswith(MARKER)]
+
+# Add plugin permissions with marker
+for p in PLUGIN_PERMISSIONS:
+    tagged = f"{p} {MARKER}"
+    if tagged not in allow_list:
+        allow_list.append(tagged)
+
+# Add output directory
+if output_dir not in additional_dirs:
+    additional_dirs.append(output_dir)
+
+perms["allow"] = allow_list
+perms["additionalDirectories"] = additional_dirs
+settings["permissions"] = perms
+
+# Write back
+os.makedirs(os.path.dirname(settings_file), exist_ok=True)
+with open(settings_file, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+
+print(f"   ✓ {len(PLUGIN_PERMISSIONS)} permissions configured in settings.json")
+print(f"   ✓ Output directory added: {output_dir}")
+PYEOF
+
+  # Update config to record that permissions were configured
+  sed -i.bak 's/PERMISSIONS_CONFIGURED=false/PERMISSIONS_CONFIGURED=true/' "$CONFIG_FILE" 2>/dev/null || \
+    sed -i '' 's/PERMISSIONS_CONFIGURED=false/PERMISSIONS_CONFIGURED=true/' "$CONFIG_FILE"
+  rm -f "$CONFIG_FILE.bak"
+}
+
+if [ "$AUTO_PERMISSIONS" = true ]; then
+  configure_permissions
+else
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "  🔐 Permission Configuration (one-time setup)"
+  echo ""
+  echo "  This plugin needs the following permissions to"
+  echo "  run without manual approval every time:"
+  echo ""
+  echo "  • WebSearch — search for stock news"
+  echo "  • WebFetch  — read financial news websites"
+  echo "    (Yahoo Finance, Bloomberg, Reuters, etc.)"
+  echo "  • Bash      — run Python analysis scripts"
+  echo "    (limited to plugin scripts & report dirs only)"
+  echo ""
+  echo "  These permissions are READ-ONLY and scoped to"
+  echo "  specific domains and file paths. No data is"
+  echo "  uploaded or sent anywhere."
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  read -r -p "  Auto-configure permissions? [Y/n] " response
+  case "$response" in
+    [nN]|[nN][oO])
+      echo ""
+      echo "   ⏭  Skipped. You'll be prompted for each action in Claude Code."
+      echo "      Re-run with --auto-permissions to configure later."
+      ;;
+    *)
+      configure_permissions
+      ;;
+  esac
+fi
+
+# Step 6: Done
 echo ""
 echo "═══════════════════════════════════════════════"
 echo ""
@@ -117,7 +261,8 @@ echo ""
 echo "  Open Claude Code in ANY directory and try:"
 echo "    分析台積電"
 echo "    analyze AAPL"
-echo "    幫我看看鴻海"
+echo "    台積電本益比多少     (quick answer)"
+echo "    鴻海的財務狀況       (selective analysis)"
 echo ""
 echo "  Reports will be saved to:"
 echo "    $OUTPUT_DIR/{stock_name}/"
