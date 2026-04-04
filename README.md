@@ -35,9 +35,11 @@
 | Feature                    | Description                                                    |
 | -------------------------- | -------------------------------------------------------------- |
 | **6 AI Analyst Agents**    | 財務、技術、量化、產業總經、新聞情緒、法人籌碼，各司其職       |
-| **Parallel Execution**     | 6 位分析師同時運行，大幅縮短分析時間                           |
+| **3 Analysis Modes**       | 完整分析 / 選擇性分析 / 快速問答，依意圖自動切換               |
+| **Parallel Everything**    | 資料抓取並行化 + 6 位分析師同時運行 + Agent 級同日快取          |
 | **Professional Dashboard** | 互動式 HTML 儀表板，含雷達圖、K線圖、分析師觀點                |
 | **Multi-Market Support**   | 台股（2330.TW）、美股（AAPL）、日股（4704.T）、港股（0700.HK） |
+| **Tiered Validation**      | 三層資料品質閘門（hard_stop / warning / passed）+ 市場特定閾值 |
 | **Traditional Chinese**    | 所有分析報告以繁體中文撰寫，專業投資級別用語                   |
 | **Zero API Keys**          | 使用 yfinance 免費資料，無需任何 API Key                       |
 | **Self-Contained Output**  | 單一 HTML 檔案即是完整報告，可離線瀏覽                         |
@@ -54,47 +56,57 @@
                        ▼
 ┌──────────────────────────────────────────────────────┐
 │              🎯 Orchestrator (指揮官)                  │
-│         解析意圖 → 調度流程 → 整合報告                    │
+│    意圖解析 → 模式分類 → Agent 快取檢查 → 整合報告       │
 └──────────────────────┬──────────────────────────────┘
                        │
           ┌────────────┼────────────┐
-          ▼            ▼            ▼
-   ┌─────────┐  ┌──────────┐  ┌──────────┐
-   │  Data   │  │  Data    │  │  Read &  │
-   │ Fetcher │→ │Validator │→ │ Extract  │
-   │ (Python)│  │ (Python) │  │  Data    │
-   └─────────┘  └──────────┘  └────┬─────┘
-                                   │
-        ┌──────────┬──────────┬────┴────┬──────────┬──────────┐
-        ▼          ▼          ▼         ▼          ▼          ▼
-   ┌─────────┐┌─────────┐┌────────┐┌────────┐┌─────────┐┌─────────┐
-   │ 💰 財務 ││ 📈 技術 ││ 🔢 量化 ││ 🏭 產業 ││ 📰 情緒 ││ 🏦 法人 │
-   │ 分析師  ││ 分析師  ││ 分析師  ││ 分析師  ││ 分析師  ││ 分析師  │
-   │(Claude) ││(Claude) ││(Claude) ││(Claude) ││(Claude) ││(Claude) │
-   └────┬────┘└────┬────┘└────┬───┘└───┬────┘└────┬────┘└────┬────┘
-        │          │          │        │          │          │
-        └──────────┴──────────┴────┬───┴──────────┴──────────┘
-                                   ▼
-                    ┌──────────────────────────┐
-                    │  🧠 Integration (Claude)  │
-                    │  加權整合 → 綜合評分         │
-                    └─────────────┬────────────┘
-                                  ▼
-                    ┌──────────────────────────┐
-                    │  📊 Dashboard (Python)    │
-                    │  互動式 HTML 儀表板         │
-                    └──────────────────────────┘
+          │     quick_answer?       │
+          │     ↓ Yes    ↓ No       │
+          ▼              ▼          │
+   ┌───────────┐  ┌──────────────┐ │
+   │quick_quote│  │fetch_and_    │ │
+   │   .py     │  │validate.py   │ │
+   │ (1 sec)   │  │(parallel API)│ │
+   └─────┬─────┘  └──────┬───────┘ │
+         │               │         │
+         ▼               ▼         │
+      直接回答     ┌─────────────┐  │
+                  │ Tiered Gate │  │
+                  │ hard_stop?  │  │
+                  │ warning?    │  │
+                  │ passed?     │  │
+                  └──────┬──────┘  │
+                         │         │
+        ┌────────┬───────┼────┬────┴────┬──────────┐
+        ▼        ▼       ▼    ▼         ▼          ▼
+   ┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐
+   │💰 財務 ││📈 技術 ││🔢 量化 ││🏭 產業 ││📰 情緒 ││🏦 法人 │
+   │ 分析師 ││ 分析師 ││ 分析師 ││ 分析師 ││ 分析師 ││ 分析師 │
+   │(Claude)││(Claude)││(Claude)││(Claude)││(Claude)││(Claude)│
+   └───┬────┘└───┬────┘└───┬───┘└───┬────┘└───┬────┘└───┬────┘
+       │         │         │       │          │         │
+       └─────────┴─────────┴───┬───┴──────────┴─────────┘
+                               ▼
+                ┌──────────────────────────┐
+                │  🧠 Integration (Claude)  │
+                │  加權整合 → 綜合評分         │
+                └─────────────┬────────────┘
+                              ▼
+                ┌──────────────────────────┐
+                │  📊 Dashboard (Python)    │
+                │  互動式 HTML 儀表板         │
+                └──────────────────────────┘
 ```
 
 ### Hybrid Design Philosophy
 
-| Layer                | Technology        | Why                                               |
-| -------------------- | ----------------- | ------------------------------------------------- |
-| **Data Fetching**    | Python + yfinance | 結構化 API 呼叫、數值計算、技術指標運算           |
-| **Data Validation**  | Python            | 規則式品質檢查、異常偵測、信心度評分              |
-| **6 Analyst Agents** | Claude LLM        | 語義理解、跨維度推理、專業判斷，遠超 if/else 規則 |
-| **Integration**      | Claude LLM        | 多維度綜合推理、敘事報告撰寫                      |
-| **Dashboard**        | Python → HTML     | 穩定的模板化輸出、Chart.js 互動圖表               |
+| Layer                     | Technology        | Why                                                         |
+| ------------------------- | ----------------- | ----------------------------------------------------------- |
+| **Data Fetch + Validate** | Python + yfinance | 並行 API 呼叫（ThreadPoolExecutor）、單一進程 fetch→validate |
+| **Quality Gate**          | Python            | 三層分級閘門、市場特定閾值（台股漲跌停 11%）                |
+| **6 Analyst Agents**      | Claude LLM        | 語義理解、跨維度推理、專業判斷，遠超 if/else 規則           |
+| **Integration**           | Claude LLM        | 多維度綜合推理、敘事報告撰寫                                |
+| **Dashboard**             | Python → HTML     | 穩定的模板化輸出、Chart.js 互動圖表、base64 資產快取        |
 
 ---
 
@@ -146,7 +158,7 @@
 - 情緒指數（-10 到 +10）加權計算
 - 重大事件偵測（財報、併購、監管）
 - 市場敘事方向與轉變判斷
-- **自動 WebSearch**：若 yfinance 新聞資料為空（台股/日股常見），自動搜尋補充
+- **獨立新聞蒐集**：Agent 自行透過 WebSearch 搜尋 5-10 篇近期新聞（不依賴 yfinance 新聞）
 
 ### 🏦 法人籌碼分析師 Institutional Flow Analyst
 
@@ -169,8 +181,8 @@
 ### Step 1: Clone & Install
 
 ```bash
-git clone https://github.com/YourUsername/fubon-stock-advisor.git
-cd fubon-stock-advisor
+git clone https://github.com/liiandy/stock-analysis-system.git
+cd stock-analysis-system
 chmod +x install.sh
 ./install.sh
 ```
@@ -216,14 +228,28 @@ If everything is set up correctly, the system will begin the full analysis pipel
 
 ### Quick Start — Just Talk to Claude
 
-在 Claude Code 中直接用自然語言觸發：
+在 Claude Code 中直接用自然語言觸發，系統會自動判斷使用哪種模式：
 
+#### Mode A: 快速問答 `quick_answer` (~1 秒)
 ```
-分析台積電          → 分析 TSMC (2330.TW)
-分析鴻海            → 分析 Foxconn (2317.TW)
-analyze AAPL       → 分析 Apple Inc.
-幫我看看 NVDA      → 分析 NVIDIA
-這支股票值得投資嗎   → 搭配 ticker 進行完整分析
+台積電本益比多少     → 直接回答 PE ratio
+AAPL 股價多少       → 即時價格查詢
+鴻海殖利率多少      → 單一數據點回答
+```
+
+#### Mode B: 選擇性分析 `selective` (~20-30 秒)
+```
+台積電的財務狀況     → 只跑財務 + 產業分析師
+技術面怎麼樣        → 只跑技術分析師
+法人籌碼動向        → 只跑法人籌碼分析師
+```
+
+#### Mode C: 完整分析 `full_analysis` (~35-50 秒)
+```
+分析台積電          → 6 位分析師全部上陣
+分析鴻海            → 完整 Dashboard
+analyze AAPL       → Full pipeline
+幫我看看 NVDA      → 完整分析
 ```
 
 ### Supported Ticker Formats
@@ -244,24 +270,31 @@ analyze AAPL       → 分析 Apple Inc.
 SKILLS=~/.claude/skills
 OUT=~/fubon-stock-reports/tsmc
 
-# 1. Fetch data
-python $SKILLS/stock-data-fetcher/scripts/fetch_data.py 2330.TW --output $OUT/raw_data.json
+# 1. Fetch + Validate (combined, with parallel API calls)
+python $SKILLS/stock-data-fetcher/scripts/fetch_and_validate.py 2330.TW \
+  --output $OUT/validated_data.json \
+  --raw-output $OUT/raw_data.json
+# Exit code: 0=success, 2=hard_stop (confidence<30%), 1=error
 
-# 2. Validate data
-python $SKILLS/stock-data-validator/scripts/validate_data.py --input $OUT/raw_data.json --output $OUT/validated_data.json
+# 2. Run quantitative analysis
+python $SKILLS/stock-quant-analyst/scripts/analyze_quant.py \
+  --input $OUT/validated_data.json --output $OUT/quant_analysis.json
 
-# 3. Run quantitative analysis
-python $SKILLS/stock-quant-analyst/scripts/analyze_quant.py --input $OUT/validated_data.json --output $OUT/quant_analysis.json
-
-# 4. Generate dashboard (after integrated_report.json is ready)
+# 3. Generate dashboard (after integrated_report.json is ready)
 python $SKILLS/stock-dashboard/scripts/generate_dashboard.py \
   --integrated $OUT/integrated_report.json \
   --validated $OUT/validated_data.json \
   --output $OUT/dashboard.html
 
-# 5. Open in browser
+# 4. Open in browser
 open $OUT/dashboard.html
 ```
+
+> **Note**: 也可以分開執行 fetch + validate（向下相容）：
+> ```bash
+> python $SKILLS/stock-data-fetcher/scripts/fetch_data.py 2330.TW --output $OUT/raw_data.json
+> python $SKILLS/stock-data-validator/scripts/validate_data.py --input $OUT/raw_data.json --output $OUT/validated_data.json
+> ```
 
 ---
 
@@ -269,30 +302,46 @@ open $OUT/dashboard.html
 
 完整的 7 步驟分析流程：
 
-### Step 1: 解析使用者意圖
+### Step 1: 解析使用者意圖 & 模式分類
 
-Orchestrator 從自然語言中提取 ticker，支援公司名稱（鴻海）到 ticker（2317.TW）的自動映射。
+Orchestrator 從自然語言中提取 ticker，支援公司名稱（鴻海）到 ticker（2317.TW）的自動映射。若公司名不確定，自動 WebSearch 查詢正確 ticker。
 
-### Step 2: 資料抓取 & 驗證
+接著分類為三種模式之一：
+- **quick_answer**：單一數據查詢 → `quick_quote.py` 直接回答，跳過後續步驟
+- **selective**：特定維度分析 → 只啟動相關 Agent
+- **full_analysis**：完整 6 Agent 分析
+
+### Step 2: 資料抓取 & 驗證（合併腳本）
 
 ```
-fetch_data.py → raw_data.json → validate_data.py → validated_data.json
+fetch_and_validate.py → validated_data.json (+ optional raw_data.json)
 ```
 
-- yfinance 抓取 7 大類資料（公司資訊、財報、股價歷史、技術指標、新聞、持股、分析師）
-- 驗證器檢查資料新鮮度（股價 <15 分鐘、財報 <90 天）、異常值、跨來源一致性
+- `fetch_data.py` 內部使用 **ThreadPoolExecutor** 並行呼叫 7 個 API（~3-4 秒，原本 ~8-12 秒）
+- `validate_data.py` 在同一進程中直接處理，省去一次 Python 冷啟動 + JSON 序列化
+- 自動偵測市場並套用對應閾值（如台股漲跌停 11%）
 
-### Step 3: 資料讀取 & 摘要
+### Step 3: 三層資料品質閘門
 
-Orchestrator 讀取 validated_data.json，提取各分析師所需的關鍵數據。
+| Tier | Confidence | Action |
+|------|-----------|--------|
+| `hard_stop` | < 30% | 停止分析，通知使用者 |
+| `warning` | 30-49% | 警告但繼續，降低信心預期 |
+| `passed` | ≥ 50% | 正常進行 |
 
-### Step 4: 6 位 AI 分析師並行分析
+### Step 3.5: Agent 快取檢查 & Quant 預啟動
 
-6 個 Claude Agent 同時啟動，各自接收相關數據並進行專業分析。每位分析師輸出獨立的 JSON 報告，包含：
+- 檢查同日已完成的 Agent 分析，直接復用（selective → full 場景特別有效）
+- `analyze_quant.py` 在背景啟動，與 Agent 並行運算
+
+### Step 4: AI 分析師並行分析
+
+Claude Agent 同時啟動（扣除快取命中的），各自接收相關數據並進行專業分析。每位分析師輸出獨立的 JSON 報告，包含：
 
 - **Score** (0-10)：該維度評分
 - **Confidence**：信心水準
 - **Summary**：繁體中文分析摘要
+- **data_limitations**：資料限制揭露（Zero Hallucination Policy）
 
 ### Step 5: 整合與綜合評估
 
@@ -367,25 +416,30 @@ Dashboard 為自包含的單一 HTML 檔案，使用 CDN 載入 Tailwind CSS 和
 ## Project Structure
 
 ```
-fubon-stock-advisor/
+stock-analysis-system/
 │
 ├── stock-orchestrator/           # 🎯 指揮官 — 整體流程控制
-│   └── SKILL.md                  #    Skill 定義（觸發條件、7 步驟流程）
+│   └── SKILL.md                  #    3 模式、Agent 快取、分層品質閘門
 │
 ├── stock-data-fetcher/           # 📥 資料抓取 — Yahoo Finance
 │   ├── SKILL.md
 │   └── scripts/
-│       └── fetch_data.py         #    yfinance 資料收集（7 大類）
+│       ├── fetch_data.py         #    並行 API 呼叫（ThreadPoolExecutor）
+│       ├── fetch_and_validate.py #    合併 fetch + validate 單一進程 ⚡
+│       └── quick_quote.py        #    快速問答用輕量腳本
 │
 ├── stock-data-validator/         # ✅ 資料驗證 — 品質把關
 │   ├── SKILL.md
 │   └── scripts/
-│       └── validate_data.py      #    新鮮度、異常值、信心度檢查
+│       └── validate_data.py      #    可設定閾值、市場特定覆寫、三層閘門
+│
+├── shared/                       # 📋 共用資源
+│   └── zero_hallucination_policy.md  # 6 Agent 共用的反幻覺政策
 │
 ├── stock-financial-analyst/      # 💰 財務分析師
-│   ├── SKILL.md                  #    分析框架 & 輸出格式定義
+│   ├── SKILL.md
 │   └── scripts/
-│       └── analyze_financial.py  #    資料前處理輔助
+│       └── analyze_financial.py
 │
 ├── stock-technical-analyst/      # 📈 技術分析師
 │   ├── SKILL.md
@@ -395,7 +449,7 @@ fubon-stock-advisor/
 ├── stock-quant-analyst/          # 🔢 量化分析師
 │   ├── SKILL.md
 │   └── scripts/
-│       └── analyze_quant.py      #    統計指標計算（Sharpe, Sortino, etc.）
+│       └── analyze_quant.py      #    Sharpe, Sortino, Beta（背景預啟動）
 │
 ├── stock-industry-macro/         # 🏭 產業總經分析師
 │   ├── SKILL.md
@@ -403,7 +457,7 @@ fubon-stock-advisor/
 │       └── analyze_industry.py
 │
 ├── stock-news-sentiment/         # 📰 新聞情緒分析師
-│   ├── SKILL.md                  #    含 WebSearch 自動補充規則
+│   ├── SKILL.md                  #    WebSearch 自動搜尋新聞
 │   └── scripts/
 │       └── analyze_sentiment.py
 │
@@ -412,15 +466,16 @@ fubon-stock-advisor/
 │   └── scripts/
 │       └── analyze_institutional.py
 │
-├── stock-integrator/             # 🧠 整合引擎
+├── stock-integrator/             # 🧠 整合引擎（已棄用）
 │   ├── SKILL.md
 │   └── scripts/
-│       └── integrate_analyses.py #    加權整合 & 評分
+│       └── integrate_analyses.py #    ⚠ DEPRECATED — 整合由 Orchestrator LLM 執行
 │
 ├── stock-dashboard/              # 📊 Dashboard 生成器
 │   ├── SKILL.md
+│   ├── assets/                   #    Fubon logo + 6 分析師頭像
 │   └── scripts/
-│       └── generate_dashboard.py #    HTML/CSS/JS 報告產生
+│       └── generate_dashboard.py #    HTML 報告產生（base64 資產快取）
 │
 ├── install.sh                    # 🔧 一鍵安裝腳本
 ├── uninstall.sh                  # 🗑  解除安裝腳本
@@ -451,15 +506,28 @@ Sentiment:     10%  (短期情緒權重最低)
 
 ### Validation Thresholds
 
-`stock-data-validator/scripts/validate_data.py` 中可調整：
+`validate_data.py` 現在支援可設定閾值，可透過 `--config config.json` 覆寫，或自動依市場套用：
 
-| Parameter           | Default | Description        |
-| ------------------- | ------- | ------------------ |
-| Price Freshness     | 15 min  | 股價資料新鮮度上限 |
-| Financial Freshness | 90 days | 財報資料新鮮度上限 |
-| PE Ratio Range      | 0 - 500 | 合理 PE 區間       |
-| Max Daily Change    | 20%     | 單日漲跌幅異常門檻 |
-| EPS Growth Cap      | 300%    | EPS 季增長異常門檻 |
+| Parameter             | Default | TW Override | Description        |
+| --------------------- | ------- | ----------- | ------------------ |
+| `price_freshness_days`    | 3 days  | —           | 股價資料新鮮度上限 |
+| `financial_freshness_days`| 120 days| —           | 財報資料新鮮度上限 |
+| `pe_min` / `pe_max`      | 0 - 500 | —           | 合理 PE 區間       |
+| `single_day_change_limit` | 20%     | **11%**     | 單日漲跌幅異常門檻 |
+| `volume_spike_ratio`      | 500%    | —           | 成交量異常倍數     |
+| `min_confidence_pass`     | 50      | —           | 通過驗證最低信心度 |
+| `hard_stop_confidence`    | 30      | —           | 低於此值直接停止   |
+
+自訂閾值範例：
+```json
+{
+  "single_day_change_limit": 0.15,
+  "min_confidence_pass": 60
+}
+```
+```bash
+python fetch_and_validate.py 2330.TW --output out.json --config my_thresholds.json
+```
 
 ---
 
@@ -467,9 +535,9 @@ Sentiment:     10%  (短期情緒權重最低)
 
 | Issue             | Description                               | Workaround                                       |
 | ----------------- | ----------------------------------------- | ------------------------------------------------ |
-| 台股/日股新聞為空 | yfinance 對台股、日股的新聞標題常回傳空白 | 情緒分析師自動使用 WebSearch 補充                |
+| 新聞搜尋受限      | WebSearch 可能因速率限制回傳不完整結果     | 情緒分析師自動降級為中性評分並標記限制           |
 | 即時報價延遲      | yfinance 免費資料有 15-20 分鐘延遲        | 適用於中長期分析，非即時交易                     |
-| 台股財報格式      | 部分台股財報欄位與美股不同                | 驗證器會標記缺失欄位                             |
+| 台股財報格式      | 部分台股財報欄位與美股不同                | 驗證器會標記缺失欄位，分析師降低信心度           |
 | 需要網路連線      | 資料抓取和 Dashboard CDN 資源需要網路     | 已生成的 dashboard.html 圖表資料內嵌，可部分離線 |
 
 ---
