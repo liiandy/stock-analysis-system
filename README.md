@@ -187,17 +187,27 @@ chmod +x install.sh
 ./install.sh
 ```
 
-That's it! The install script will:
+The install script will:
 1. Install Python dependencies (`yfinance`, `pandas`, `numpy`)
-2. Copy all 11 Skills to `~/.claude/skills/`
+2. Copy all 11 Skills + `shared/` to `~/.claude/skills/`
 3. Replace path placeholders with your machine's absolute paths
 4. Create output directory at `~/fubon-stock-reports/`
 5. Write config to `~/.claude/stock-analysis.conf`
+6. **Ask once** whether to auto-configure Claude Code permissions (WebSearch, WebFetch, Bash)
 
-### Custom Output Directory (Optional)
+If you answer **Y** to the permission prompt, the plugin will run fully automatically without any manual approval popups. All permissions are:
+- **Read-only** (WebFetch only reads web pages, never uploads)
+- **Scoped** to plugin scripts and financial news domains only
+- **Removable** — cleanly removed on uninstall
+
+### Options
 
 ```bash
+# Custom output directory
 ./install.sh --output-dir ~/Desktop/stock-reports
+
+# Skip permission prompt (auto-approve, for CI/automation)
+./install.sh --auto-permissions
 ```
 
 ### Step 2: Verify — Open Claude Code in **ANY** Directory
@@ -218,9 +228,12 @@ If everything is set up correctly, the system will begin the full analysis pipel
 ### Uninstall
 
 ```bash
-./uninstall.sh                  # Keep reports
-./uninstall.sh --remove-reports # Remove everything
+./uninstall.sh                    # Keep reports & remove permissions
+./uninstall.sh --remove-reports   # Remove everything including reports
+./uninstall.sh --keep-permissions # Keep permissions in settings.json
 ```
+
+Uninstall automatically removes all plugin permissions from `~/.claude/settings.json` (identified by `# __stock-analysis-plugin__` marker) without affecting your other settings.
 
 ---
 
