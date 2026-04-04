@@ -132,30 +132,50 @@ python {{SKILLS_DIR}}/stock-data-fetcher/scripts/fetch_and_validate.py {TICKER} 
 
 **Note**: The fetch script now uses parallel API calls internally (ThreadPoolExecutor), so data fetching is ~2-3x faster than before.
 
-### Step 3: Read Validated Data & Tiered Quality Gate
-Use the Read tool to read `validated_data.json`. **Check the `validation_tier` field first:**
+### Step 3: Extract Validated Data & Tiered Quality Gate
+
+**⚠ DO NOT use the Read tool on validated_data.json** — it's 100-230KB and ~92% is price_history that bloats your context with ~24K useless tokens. Instead, use ONE python3 command to extract a compact summary:
+
+```bash
+python3 -c "
+import json
+with open('{{OUTPUT_DIR}}/{name}/validated_data.json') as f:
+    d = json.load(f)
+vd = d.get('validated_data', d)
+# Print everything EXCEPT price_history (which is 92% of file size)
+out = {
+    'validation_tier': d.get('validation_tier'),
+    'overall_confidence': d.get('overall_confidence'),
+    'validation_notes': d.get('validation_notes', []),
+    'anomaly_detection': [a for a in d.get('anomaly_detection', []) if a.get('severity') == 'high'],
+    'data_completeness': d.get('data_completeness', {}),
+    'confidence_scores': d.get('confidence_scores', {}),
+    'company_info': vd.get('company_info', {}),
+    'technical_indicators': vd.get('technical_indicators', {}),
+    'financial_statements': vd.get('financial_statements', {}),
+    'holders': vd.get('holders', {}),
+    'analyst_data': vd.get('analyst_data', {}),
+    'twse_data': vd.get('twse_data', {}),
+    'price_history_count': len(vd.get('price_history', [])),
+    'price_history_last5': vd.get('price_history', [])[-5:],
+}
+print(json.dumps(out, indent=2, ensure_ascii=False))
+"
+```
+
+This gives you **all data needed to route to agents** in ~5-8KB instead of 100-230KB. **Do NOT run additional python3 -c commands** — this single extraction is sufficient.
+
+**Check `validation_tier` first:**
 
 | `validation_tier` | Action |
 |---|---|
-| `"hard_stop"` | Confidence < 30%. **Report failures to user and STOP.** Do not launch agents. |
-| `"warning"` | Confidence 30-49%. **Warn user** that data quality is low, then proceed with reduced confidence expectations. |
+| `"hard_stop"` | Confidence < 30%. **Report to user and STOP.** |
+| `"warning"` | Confidence 30-49%. **Warn user**, proceed with reduced expectations. |
 | `"passed"` | Confidence >= 50%. Proceed normally. |
 
-**Additional checks (for `warning` and `passed` tiers):**
-1. **Review `validation_notes`** — report any warnings to the user (e.g., stale data, missing sections, anomalies).
-2. **Review `anomaly_detection`** — if there are `high` severity anomalies, warn the user that analysis reliability may be reduced.
-3. **Check `data_completeness.completeness_pct`** — if below 60%, warn the user about missing data sections.
-4. **Check `confidence_scores`** per category — if any category scores below 50, note that the corresponding analyst's output should be weighted lower.
+Also check: `validation_notes` for warnings, `anomaly_detection` for high-severity items, `data_completeness.completeness_pct` if below 60%.
 
-Then extract the key data points from `validated_data.validated_data` (the nested structure):
-- Company info (name, sector, industry, market cap, PE, PB, EPS, ROE, margins, currency, current_price, etc.)
-- Latest price and price history summary (now 2 years of data)
-- Technical indicators (RSI, MACD, Bollinger Bands, KD)
-- Financial statements summary
-- Holder information
-- Analyst recommendations
-- **TWSE data** (for Taiwan stocks): `twse_data.institutional_trading` (三大法人買賣超) and `twse_data.margin_trading` (融資融券)
-- **Note**: News is NOT in validated_data — the sentiment agent handles news collection independently via WebSearch
+**Note**: News is NOT in validated_data — the sentiment agent collects news independently via WebSearch.
 
 ### Step 1.8: Quick Answer Early Exit (mode = `quick_answer` ONLY)
 
@@ -290,7 +310,7 @@ Do NOT dump the entire validated_data.json to every agent. Each agent only recei
 | Agent | Data to provide (from validated_data.validated_data) |
 |-------|-----------------------------------------------------|
 | `financial_analyst` | `company_info` + `financial_statements` |
-| `technical_analyst` | `company_info.current_price/currency` + `price_history` (last 120 records only) + `technical_indicators` |
+| `technical_analyst` | `company_info.current_price/currency` + `technical_indicators` + `price_history_last5` (from Step 3 summary — recent trend context is enough since full technical indicators are pre-calculated) |
 | `quantitative_analyst` | The output of `quant_analysis.json` (from Step 3.5) + `company_info.beta` |
 | `industry_macro` | `company_info` fields: name, sector, industry, market_cap, pe_ratio, pb_ratio, return_on_equity |
 | `news_sentiment` | `company_info.name` + ticker only (agent collects news independently via WebSearch) |
