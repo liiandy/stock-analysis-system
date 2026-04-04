@@ -211,12 +211,17 @@ done
 - For any `CACHED:{file}`, **skip launching that agent** — reuse the existing JSON.
 - This is especially useful when transitioning from selective → full analysis on the same stock.
 
-### Step 4: Launch Analyst Agents
+### Step 4: Launch Analyst Agents (MUST be parallel)
 
 **If mode is `full_analysis`**: Launch all 6 agents in parallel (minus any cached from Step 3.8).
 **If mode is `selective`**: Launch ONLY the agents identified in Step 1 (minus cached).
 
-For both modes, use the **Agent tool** to launch agents in parallel. Each agent receives:
+**⚠ CRITICAL — 強制並行啟動**:
+You MUST launch ALL required agents in a **single response message** containing multiple Agent tool calls. This is the ONLY way to achieve true parallelism — if you send them in separate messages, they run sequentially and waste 5x the time.
+
+Example (full_analysis, no cache): Your response should contain **6 Agent tool calls in one message**, NOT 6 separate turns.
+
+Each agent receives:
 1. The role description from its SKILL.md
 2. The relevant data extracted from validated_data.json
 3. Instructions to output its analysis result
@@ -246,16 +251,16 @@ Compact version for prompt injection (if context is tight):
 
 Each agent must return its JSON analysis in its response. **Every agent output must include a `data_limitations` array field.**
 
-### Step 4.5: Save Agent Outputs (orchestrator writes all files)
+### Step 4.5: Save Agent Outputs (orchestrator writes all files — MUST be parallel)
 
 After all agents complete:
 1. Extract the JSON from each agent's response text.
-2. Use the **Write tool** to save each file to the output directory (e.g., `financial_analysis.json`, `industry_analysis.json`, etc.).
+2. **⚠ Use the Write tool to save ALL files in a single response message** — e.g., 6 Write tool calls in one message for 6 agents. Do NOT save them one-by-one in separate turns. This cuts 6 sequential writes into 1 parallel batch.
 3. **NEVER use Bash heredoc** to write these files — always use the Write tool to guarantee correct UTF-8 encoding.
 
 ### Step 5: Integration — Synthesize Analyses
 
-Read all the agent output JSONs you just saved.
+You already have all agent outputs from Step 4 (in-memory from agent responses). **Do NOT re-read the files you just wrote** — use the data you already extracted in Step 4.5.
 
 Then, using YOUR OWN reasoning as Claude, produce `integrated_report.json`. For `selective` mode, add these two extra fields at the top level:
 ```json
