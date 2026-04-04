@@ -166,6 +166,10 @@ PLUGIN_PERMISSIONS = [
     f"Bash(python {skills_dir}/stock-integrator/scripts/*)",
     f"Bash(python {skills_dir}/stock-dashboard/scripts/*)",
     f"Bash(open {output_dir}/*)",
+    # --- Bash: orchestrator runtime commands ---
+    f"Bash(TODAY=*)",                            # Cache check (Step 1.5, 3.8)
+    f"Bash(python3 -c *)",                       # Ad-hoc JSON extraction from validated_data
+    f"Bash(cat {output_dir}/*)",                  # Read output files
 ]
 
 # A marker so uninstall.sh can identify and remove these
