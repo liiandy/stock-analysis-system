@@ -289,12 +289,16 @@ Each agent receives:
 2. The relevant data extracted from validated_data.json
 3. Instructions to output its analysis result
 
-**CRITICAL — Agent Output Method (防止亂碼)**:
-Sub-agents running in background cannot reliably write files (permission issues). Therefore:
-- **DO NOT** instruct agents to write JSON files themselves.
-- Instead, instruct each agent to **return the complete JSON in its response text** (inside a ```json code block).
-- After all agents complete, the **orchestrator (you) reads each agent's response**, extracts the JSON, and uses the **Write tool** to save each file (e.g., `financial_analysis.json`).
-- **NEVER use bash heredoc (`cat << EOF`)** to write JSON containing Chinese text — this corrupts UTF-8 multi-byte characters. Always use the Write tool.
+**CRITICAL — Agent Output Method (agent 自行寫檔)**:
+Each agent MUST write its own output JSON file directly using the **Write tool**. Include the exact file path in the agent prompt:
+- Financial Analyst → `{{OUTPUT_DIR}}/{name}/financial_analysis.json`
+- Technical Analyst → `{{OUTPUT_DIR}}/{name}/technical_analysis.json`
+- Quantitative Analyst → `{{OUTPUT_DIR}}/{name}/quant_analysis.json` (overwrite script output with interpreted version)
+- Industry & Macro → `{{OUTPUT_DIR}}/{name}/industry_analysis.json`
+- News Sentiment → `{{OUTPUT_DIR}}/{name}/sentiment_analysis.json`
+- Institutional Flow → `{{OUTPUT_DIR}}/{name}/institutional_analysis.json`
+
+Tell each agent: "完成分析後，用 Write tool 將 JSON 寫入 `{exact_path}`。" The agent's response text should contain a brief summary (score + 1-sentence takeaway) for your synthesis use — NOT the full JSON.
 
 The 6 analysts (launch all for `full_analysis`, or only the selected ones for `selective`):
 1. **Financial Analyst** — Fundamental analysis (profitability, valuation, financial structure, dividends)
@@ -320,16 +324,21 @@ Do NOT dump the entire validated_data.json to every agent. Each agent only recei
 Append the following to EVERY agent prompt (replaces per-agent duplicated blocks):
 > **Zero Hallucination Policy**: (1) 絕對禁止使用訓練資料填補缺失數據 (2) 所有缺失或不確定的資料必須列入 data_limitations 欄位 (3) summary 最後一段必須以「⚠ 資料限制」揭露不足之處 (4) 寧可留白不可捏造。data_limitations 為必填欄位。
 > **Score-then-Justify 協議**: Phase 1: 閱讀資料後立即依 SKILL.md 錨點表給出 preliminary_score。Phase 2: 展開分析、撰寫 summary。Phase 3: 若最終 score 與 preliminary_score 差距 > 1.0，必須填 score_adjustment_reason。
-> **Output rules**: summary 用繁體中文。Return complete JSON in response text (```json block)。data_limitations 為必填欄位（即使無限制也輸出 []）。
+> **Output rules**: summary 用繁體中文。用 Write tool 將完整 JSON 寫入指定路徑。response text 只需回報 score + 一句重點摘要。data_limitations 為必填欄位（即使無限制也輸出 []）。
 
-Each agent must return its JSON analysis in its response.
+Each agent must **write its JSON to the specified file path** and return a brief summary in response text.
 
-### Step 4.5: Save Agent Outputs (orchestrator writes all files — MUST be parallel)
+### Step 4.5: Verify Agent Outputs (lightweight check)
 
-After all agents complete:
-1. Extract the JSON from each agent's response text.
-2. **⚠ Use the Write tool to save ALL files in a single response message** — e.g., 6 Write tool calls in one message for 6 agents. Do NOT save them one-by-one in separate turns. This cuts 6 sequential writes into 1 parallel batch.
-3. **NEVER use Bash heredoc** to write these files — always use the Write tool to guarantee correct UTF-8 encoding.
+After all agents complete, verify files were written:
+```bash
+for f in financial_analysis.json technical_analysis.json quant_analysis.json \
+         industry_analysis.json sentiment_analysis.json institutional_analysis.json; do
+  [ -f "{{OUTPUT_DIR}}/{name}/$f" ] && echo "OK:$f" || echo "MISSING:$f"
+done
+```
+- If any file is `MISSING`: extract the JSON from that agent's response text and save it with Write tool (fallback only).
+- If all files are `OK`: proceed directly to Step 5. **Do NOT re-write files that agents already saved.**
 
 ### Step 5: Integration — Synthesize Analyses (LLM reasoning only)
 
