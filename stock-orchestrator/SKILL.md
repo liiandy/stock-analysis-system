@@ -181,16 +181,52 @@ Where `{PERIOD}` is mapped from user's request: 近一月→`1mo`, 近兩月→`
 
 Returns: `start_price`, `end_price`, `change_pct_fmt`, `trend` (上漲/下跌/盤整), `period_high/low`, `weekly_prices`.
 
-Then reply to the user in natural language (繁體中文), for example:
+Then reply to the user in natural language (繁體中文).
+
+**For static field questions** — keep it concise (1-2 sentences):
 - User: "台積電目前股價" → "台積電（2330.TW）目前股價為 NT$890.0。"
 - User: "AAPL 殖利率多少" → "Apple（AAPL）目前殖利率為 0.55%，股價為 US$198.50。"
-- User: "永豐金近兩月股價趨勢" → "永豐金（2890.TW）近兩月走勢為**盤整**，從 NT$18.50 → NT$18.85（+1.89%）。期間最高 NT$19.20（3/15），最低 NT$17.90（2/10）。"
+
+**For price trend questions** — use the following rich format with 3 sections:
+
+```
+## {公司名}（{TICKER}）近{期間}股價趨勢
+
+**期間：{start_date} ~ {end_date} | 漲跌幅：{change_pct_fmt}**
+
+### 走勢圖（ASCII）
+用 weekly_prices 數據繪製簡易 ASCII 走勢圖，標注：
+- Y 軸：NT$（或 US$ 等），標出關鍵價位
+- 標記期間最高點（★ 期間最高 {price}（{date}））
+- 標記期間最低點（★ 期間最低 {price}（{date}））
+- 標記最新收盤（● 最新 {price}）
+- X 軸：月份時間標記
+
+### 走勢摘要
+
+| 指標 | 數值 |
+|------|------|
+| 起始價（{date}） | NT${start_price} |
+| 最新價（{date}） | NT${end_price} |
+| 期間最高 | NT${period_high} |
+| 期間最低 | NT${period_low} |
+| 區間跌幅 | {change_pct_fmt} |
+
+### 趨勢解讀
+根據 weekly_prices 走勢，分段描述趨勢變化（2-3 段）：
+1. {月份}→{月份}：{趨勢描述}（{價格範圍}），{量能/事件}
+2. {月份}→{月份}：{趨勢描述}...
+
+最後一句總結整體格局與當前位置。
+```
+
+（資料來源：Yahoo Finance，{date}）
 
 **Rules**:
-1. Keep the response concise (1-3 sentences for static, 2-4 sentences for trend). Only include what the user asked for + minimal context.
-2. For trend answers, always include: trend direction, start→end price, change %, period high/low.
+1. For static answers: 1-2 sentences only.
+2. For trend answers: MUST include all 3 sections（走勢圖 + 摘要表格 + 趨勢解讀）。
 3. Append: "（資料來源：Yahoo Finance，{date}）"
-3. **STOP here. Do NOT proceed to Step 2 or beyond. No agents, no dashboard.**
+4. **STOP here. Do NOT proceed to Step 2 or beyond. No agents, no dashboard.**
 
 ---
 
