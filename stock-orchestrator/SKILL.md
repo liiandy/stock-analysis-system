@@ -32,7 +32,13 @@ Follow these steps **exactly** in order:
 
 ### Step 1: Parse User Intent & Classify Mode
 
-First, extract the stock ticker from the user's message. If the user gives a company name (e.g. "鴻海"), map it to the correct ticker (e.g. `2317.TW`). Determine the output directory: `{{OUTPUT_DIR}}/{ticker_lowercase}/`.
+First, extract the stock ticker from the user's message.
+
+**Ticker Resolution Rules (重要 — 避免反覆猜測浪費時間)**:
+- If the user provides an explicit ticker (e.g. "2330.TW", "AAPL"), use it directly.
+- If the user gives a **well-known** company name with an obvious ticker mapping (e.g. "台積電" → `2330.TW`, "鴻海" → `2317.TW`, "Apple" → `AAPL`), map it directly.
+- If you are **NOT confident** about the ticker (less common companies, ambiguous names), **immediately use WebSearch** to look up the correct ticker. Search query example: `"{company_name} 股票代號"`. Do NOT guess multiple tickers by trial-and-error — one WebSearch is faster than 4 failed API calls.
+- After resolving the ticker, determine the output directory: `{{OUTPUT_DIR}}/{ticker_lowercase}/`.
 
 Then, classify the user's request into one of **three modes**:
 
