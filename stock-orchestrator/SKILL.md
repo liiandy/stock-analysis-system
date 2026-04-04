@@ -16,15 +16,8 @@ Activate when the user mentions:
 - Selective analysis: "台積電的財務狀況", "技術面怎麼樣", "產業前景如何"
 - Quick factual questions: "台積電本益比多少", "目前股價", "殖利率多少"
 
-## Ticker Format Reference
-
-| Market | Format | Example |
-|--------|--------|---------|
-| Taiwan TSE | `{code}.TW` | `2330.TW` (TSMC), `2317.TW` (Foxconn) |
-| Taiwan OTC | `{code}.TWO` | `6547.TWO` |
-| US | symbol directly | `AAPL`, `NVDA`, `MSFT` |
-| Japan | `{code}.T` | `4704.T` (Trend Micro) |
-| Hong Kong | `{code}.HK` | `0700.HK` (Tencent) |
+## Ticker Formats
+Taiwan TSE: `{code}.TW`, OTC: `{code}.TWO`, US: symbol directly, Japan: `{code}.T`, HK: `{code}.HK`
 
 ## Execution Pipeline
 
@@ -291,15 +284,25 @@ The 6 analysts (launch all for `full_analysis`, or only the selected ones for `s
 5. **News Sentiment Analyst** — News sentiment classification, major events, sentiment trends. **News is NOT in validated_data.** The agent must independently collect news via WebSearch → WebFetch → neutral fallback. **Must include `sources` array with URL for every article analyzed.** The agent must NEVER use training data / memory as a news source.
 6. **Institutional Flow Analyst** — Ownership structure, analyst consensus, smart money signals. **For Taiwan stocks**: Include TWSE institutional trading data (三大法人買賣超) and margin trading data (融資融券) from `validated_data.twse_data`.
 
-**IMPORTANT**: For each agent prompt, include the actual data values from validated_data.json so the agent can reason about them. Don't just tell the agent to "read the file" — provide the data inline.
+**⚠ CRITICAL — Agent Data Slicing (Token 節約)**:
+Do NOT dump the entire validated_data.json to every agent. Each agent only receives its required data slice:
 
-**CRITICAL — Zero Hallucination Directive (傳達給每個 agent)**:
-Every agent prompt MUST include the full text of `shared/zero_hallucination_policy.md` (read it once, then paste into each agent prompt). This replaces the previous per-agent duplicated blocks. Additionally, append the agent-specific confidence rule from each agent's SKILL.md.
+| Agent | Data to provide (from validated_data.validated_data) |
+|-------|-----------------------------------------------------|
+| `financial_analyst` | `company_info` + `financial_statements` |
+| `technical_analyst` | `company_info.current_price/currency` + `price_history` (last 120 records only) + `technical_indicators` |
+| `quantitative_analyst` | The output of `quant_analysis.json` (from Step 3.5) + `company_info.beta` |
+| `industry_macro` | `company_info` fields: name, sector, industry, market_cap, pe_ratio, pb_ratio, return_on_equity |
+| `news_sentiment` | `company_info.name` + ticker only (agent collects news independently via WebSearch) |
+| `institutional_flow` | `holders` + `analyst_data` + `twse_data` + `company_info.current_price/currency` |
 
-Compact version for prompt injection (if context is tight):
-> 你必須遵守 Zero Hallucination Policy：(1) 絕對禁止使用訓練資料填補缺失數據 (2) 所有缺失或不確定的資料必須列入 data_limitations 欄位 (3) summary 最後一段必須以「⚠ 資料限制」揭露不足之處 (4) 寧可留白不可捏造。data_limitations 為必填欄位。
+**Common Agent Protocol (注入每個 agent prompt 尾端)**:
+Append the following to EVERY agent prompt (replaces per-agent duplicated blocks):
+> **Zero Hallucination Policy**: (1) 絕對禁止使用訓練資料填補缺失數據 (2) 所有缺失或不確定的資料必須列入 data_limitations 欄位 (3) summary 最後一段必須以「⚠ 資料限制」揭露不足之處 (4) 寧可留白不可捏造。data_limitations 為必填欄位。
+> **Score-then-Justify 協議**: Phase 1: 閱讀資料後立即依 SKILL.md 錨點表給出 preliminary_score。Phase 2: 展開分析、撰寫 summary。Phase 3: 若最終 score 與 preliminary_score 差距 > 1.0，必須填 score_adjustment_reason。
+> **Output rules**: summary 用繁體中文。Return complete JSON in response text (```json block)。data_limitations 為必填欄位（即使無限制也輸出 []）。
 
-Each agent must return its JSON analysis in its response. **Every agent output must include a `data_limitations` array field.**
+Each agent must return its JSON analysis in its response.
 
 ### Step 4.5: Save Agent Outputs (orchestrator writes all files — MUST be parallel)
 
@@ -346,11 +349,9 @@ You already have all agent data in memory from Step 4. Using YOUR OWN reasoning,
     }
   },
   "narrative_report": {
-    "investment_summary": "2-3 paragraph investment thesis in Chinese...",
-    "fundamental_analysis": "Detailed fundamental analysis paragraph...",
-    "technical_analysis": "Detailed technical analysis paragraph...",
-    "risk_factors": "Key risk factors paragraph...",
-    "investment_recommendation": "Clear actionable recommendation...",
+    "investment_summary": "2-3 paragraph investment thesis synthesizing all dimensions (Chinese)...",
+    "risk_factors": "Key risk factors from all dimensions (1 paragraph)...",
+    "investment_recommendation": "Clear actionable recommendation (1 paragraph)...",
     "data_limitations": "彙整所有分析師回報的資料限制（自然語言段落）"
   },
   "data_limitations": [
@@ -365,7 +366,7 @@ You already have all agent data in memory from Step 4. Using YOUR OWN reasoning,
 - `summary` — executive summary synthesizing all agents
 - `dimension_scores` — you may adjust agent scores based on cross-analysis (e.g., if technical contradicts fundamental)
 - `analysts.quantitative_analyst` — the quant script outputs metrics only (no summary). You MUST provide `{"summary": "...", "confidence": "..."}` for the quant agent in synthesis. Other agents' summaries are copied from their JSONs automatically.
-- `narrative_report` — all sections, written in 繁體中文
+- `narrative_report` — 3 sections only: `investment_summary` (synthesize cross-dimension insights), `risk_factors`, `investment_recommendation`. Do NOT duplicate individual agent summaries here — the dashboard already shows each agent's full summary. Written in 繁體中文.
 - `data_limitations` — **curated** list: deduplicate, remove limitations covered by other agents, keep genuine gaps
 - `stock_info.company_name` — translate to 繁體中文 (yfinance returns English)
 
@@ -430,16 +431,7 @@ open {{OUTPUT_DIR}}/{name}/dashboard.html
 
 Report the overall score and rating to the user.
 
-## Output Format for integrated_report.json
-
-The `metrics` field in integrated_report.json feeds the dashboard's Financial Metrics cards. Extract these from `validated_data.validated_data.company_info`:
-- `pe_ratio`, `pb_ratio`, `eps` — directly from company_info
-- `roe` — format as percentage string like "22.5%"
-- `dividend_yield` — format as percentage string
-- `debt_ratio` — derive from debt_to_equity if available, format as percentage
-
 ## Error Handling
-
-- If data fetching fails: suggest the user check the ticker format
-- If an analyst agent fails: continue with remaining analysts, note the gap
-- If dashboard generation fails: still provide the text-based report to the user
+- Data fetch fails → suggest user check ticker format
+- Agent fails → continue with remaining, note the gap
+- Dashboard fails → provide text-based report

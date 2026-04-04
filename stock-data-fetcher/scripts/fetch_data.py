@@ -140,19 +140,9 @@ class StockDataFetcher:
         return self.data
 
     def _init_yfinance_ticker(self) -> None:
-        """Initialize yfinance ticker object with retries."""
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                self.yf_ticker = yf.Ticker(self.ticker)
-                # Test if ticker is valid by fetching basic info
-                _ = self.yf_ticker.info
-                self.logger.debug(f"Yfinance ticker initialized: {self.ticker}")
-                return
-            except Exception as e:
-                self.logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
-                if attempt == max_retries - 1:
-                    raise
+        """Initialize yfinance ticker object (lightweight — no API call)."""
+        self.yf_ticker = yf.Ticker(self.ticker)
+        self.logger.debug(f"Yfinance ticker initialized: {self.ticker}")
 
     def _fetch_company_info(self) -> None:
         """Fetch company information."""
@@ -221,23 +211,22 @@ class StockDataFetcher:
                     window=window, min_periods=window
                 ).mean()
 
-            # Convert to serializable format
+            # Convert to serializable format (round prices to 2 decimals, strip null MAs)
             price_history = []
             for date, row in self.price_df.iterrows():
                 price_record = {
                     "date": date.strftime("%Y-%m-%d"),
-                    "open": _serialize_value(row['Open']),
-                    "high": _serialize_value(row['High']),
-                    "low": _serialize_value(row['Low']),
-                    "close": _serialize_value(row['Close']),
+                    "open": _round2(row['Open']),
+                    "high": _round2(row['High']),
+                    "low": _round2(row['Low']),
+                    "close": _round2(row['Close']),
                     "volume": int(row['Volume']) if pd.notna(row['Volume']) else None,
-                    "ma_5": _serialize_value(row['MA_5']),
-                    "ma_10": _serialize_value(row['MA_10']),
-                    "ma_20": _serialize_value(row['MA_20']),
-                    "ma_60": _serialize_value(row['MA_60']),
-                    "ma_120": _serialize_value(row['MA_120']),
-                    "ma_240": _serialize_value(row['MA_240']),
                 }
+                # Only include MAs that have computed values (skip early nulls)
+                for window in (5, 10, 20, 60, 120, 240):
+                    val = row[f'MA_{window}']
+                    if pd.notna(val):
+                        price_record[f'ma_{window}'] = round(float(val), 2)
                 price_history.append(price_record)
 
             self.data["price_history"] = price_history
@@ -371,21 +360,42 @@ class StockDataFetcher:
             self.logger.warning(f"Failed to fetch financial statements: {str(e)}")
             self.data["metadata"]["missing_data"].append("financial_statements")
 
-    @staticmethod
-    def _process_financials(financial_df: DataFrame, statement_type: str) -> Dict[str, Any]:
-        """Process financial statement dataframes."""
+    # Key fields per statement type — keeps JSON compact (~5KB vs ~21KB)
+    _KEEP_FIELDS = {
+        "income_statement": {
+            "Total Revenue", "Gross Profit", "Operating Income", "Net Income",
+            "Basic EPS", "Diluted EPS", "EBITDA", "Operating Revenue",
+            "Cost Of Revenue", "Operating Expense",
+        },
+        "balance_sheet": {
+            "Total Assets", "Total Liabilities Net Minority Interest",
+            "Stockholders Equity", "Current Assets", "Current Liabilities",
+            "Total Debt", "Cash And Cash Equivalents",
+        },
+        "cash_flow": {
+            "Operating Cash Flow", "Free Cash Flow", "Capital Expenditure",
+            "Financing Cash Flow", "Investing Cash Flow",
+        },
+    }
+
+    @classmethod
+    def _process_financials(cls, financial_df: DataFrame, statement_type: str) -> Dict[str, Any]:
+        """Process financial statement dataframes, keeping only key fields."""
         if financial_df is None or financial_df.empty:
             return {}
 
+        keep = cls._KEEP_FIELDS.get(statement_type)
         result = {}
         try:
-            # Get last 4 quarters
             cols = financial_df.columns[:4] if len(financial_df.columns) >= 4 else financial_df.columns
             for date in cols:
                 date_str = date.strftime("%Y-%m-%d")
                 result[date_str] = {}
                 for index, value in financial_df[date].items():
-                    result[date_str][str(index)] = _serialize_value(value)
+                    field_name = str(index)
+                    if keep and field_name not in keep:
+                        continue
+                    result[date_str][field_name] = _serialize_value(value)
         except Exception as e:
             logging.getLogger(__name__).warning(f"Error processing {statement_type}: {str(e)}")
 
@@ -397,10 +407,8 @@ class StockDataFetcher:
             self.logger.debug("Fetching TWSE institutional trading data...")
             stock_no = self.ticker.replace('.TW', '').replace('.TWO', '')
 
-            # Try last 5 trading days to find data
             results = []
-            for days_back in range(0, 10):
-                target_date = datetime.now() - timedelta(days=days_back)
+            for target_date in _recent_trading_days(max_days=5):
                 date_str = target_date.strftime('%Y%m%d')
                 url = (
                     f"https://www.twse.com.tw/rwd/zh/fund/T86"
@@ -426,8 +434,8 @@ class StockDataFetcher:
                                 })
                                 break
                     if results:
-                        break  # Found data, stop looking
-                    time.sleep(0.3)  # Rate limiting
+                        break
+                    time.sleep(0.15)
                 except Exception as e:
                     self.logger.debug(f"TWSE fetch for {date_str}: {e}")
                     continue
@@ -449,8 +457,7 @@ class StockDataFetcher:
             self.logger.debug("Fetching TWSE margin trading data...")
             stock_no = self.ticker.replace('.TW', '').replace('.TWO', '')
 
-            for days_back in range(0, 10):
-                target_date = datetime.now() - timedelta(days=days_back)
+            for target_date in _recent_trading_days(max_days=5):
                 date_str = target_date.strftime('%Y%m%d')
                 url = (
                     f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN"
@@ -465,7 +472,6 @@ class StockDataFetcher:
                         data = json.loads(resp.read().decode('utf-8'))
 
                     if data.get('stat') == 'OK' and data.get('tables'):
-                        # tables[1] contains individual stock margin data
                         table = data['tables'][1] if len(data['tables']) > 1 else data['tables'][0]
                         rows = table.get('data', [])
                         for row in rows:
@@ -481,7 +487,7 @@ class StockDataFetcher:
                                 }
                                 self.logger.debug(f"TWSE margin data fetched for {date_str}")
                                 return
-                    time.sleep(0.3)
+                    time.sleep(0.15)
                 except Exception as e:
                     self.logger.debug(f"TWSE margin fetch for {date_str}: {e}")
                     continue
@@ -597,6 +603,17 @@ class StockDataFetcher:
             raise
 
 
+def _recent_trading_days(max_days: int = 5):
+    """Yield recent dates, skipping weekends (Sat/Sun)."""
+    d = datetime.now()
+    yielded = 0
+    while yielded < max_days:
+        if d.weekday() < 5:  # Mon-Fri
+            yield d
+            yielded += 1
+        d -= timedelta(days=1)
+
+
 def _safe_int(value: Any) -> Optional[int]:
     """Parse TWSE numeric strings (may contain commas) to int."""
     if value is None:
@@ -605,6 +622,15 @@ def _safe_int(value: Any) -> Optional[int]:
         return int(str(value).replace(',', '').strip())
     except (ValueError, TypeError):
         return None
+
+
+def _round2(value: Any) -> Any:
+    """Round numeric value to 2 decimal places for compact JSON output."""
+    if value is None:
+        return None
+    if pd.isna(value):
+        return None
+    return round(float(value), 2)
 
 
 def _serialize_value(value: Any) -> Any:
