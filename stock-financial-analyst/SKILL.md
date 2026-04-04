@@ -119,6 +119,6 @@ Write a JSON file with this structure:
 
 **Score (0-10)**: 8-10 = strong fundamentals, 6-8 = good, 4-6 = mixed, 2-4 = weak, 0-2 = poor
 
-**Summary must be in Traditional Chinese (繁��中文)** and read like a professional equity research note.
+**Summary must be in Traditional Chinese (繁體中文)** and read like a professional equity research note.
 
 **`data_limitations`** 為必填欄位。即使沒有限制也要輸出空陣列 `[]`。

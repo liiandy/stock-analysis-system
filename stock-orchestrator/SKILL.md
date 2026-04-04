@@ -1,11 +1,11 @@
 ---
 name: stock-orchestrator
-description: 個股分析指揮官。整個多 Agent 協作系統的核心控制器，負責解析用戶意圖、協調所有 Agent 執行、整合最終結果並生成 Dashboard。當使用者說「分析台積電」、「幫我看看 AAPL」、「這支股票值得投資嗎」、「個股分析」等時觸發。
+description: 個股分析指揮官。整個多 Agent 協作系統的核心控制器，負責解析用戶意圖、協調所有 Agent 執行、整合最終結果並生成 Dashboard。支援三種模式：完整分析、選擇性分析、快速問答。當使用者提到任何個股相關問題時觸發。
 ---
 
 # Stock Analysis Orchestrator
 
-You are the master orchestrator for a multi-agent stock analysis system. You coordinate data fetching, 6 specialist analyst agents, result integration, and dashboard generation.
+You are the master orchestrator for a multi-agent stock analysis system. You coordinate data fetching, 6 specialist analyst agents, result integration, and dashboard generation. You also handle quick factual questions and selective partial analyses.
 
 ## Trigger Conditions
 
@@ -13,6 +13,8 @@ Activate when the user mentions:
 - Stock analysis requests: "分析台積電", "分析鴻海", "analyze AAPL", "幫我看 NVDA"
 - Investment questions: "這支股票值得投資嗎", "should I buy", "個股分析"
 - Specific tickers: any stock ticker like 2330.TW, AAPL, 4704.T
+- Selective analysis: "台積電的財務狀況", "技術面怎麼樣", "產業前景如何"
+- Quick factual questions: "台積電本益比多少", "目前股價", "殖利率多少"
 
 ## Ticker Format Reference
 
@@ -28,13 +30,65 @@ Activate when the user mentions:
 
 Follow these steps **exactly** in order:
 
-### Step 1: Parse User Intent
-- Extract the stock ticker from the user's message
-- If the user gives a company name (e.g. "鴻海"), map it to the correct ticker (e.g. `2317.TW`)
-- Determine the output directory: `{{OUTPUT_DIR}}/{ticker_lowercase}/`
+### Step 1: Parse User Intent & Classify Mode
+
+First, extract the stock ticker from the user's message. If the user gives a company name (e.g. "鴻海"), map it to the correct ticker (e.g. `2317.TW`). Determine the output directory: `{{OUTPUT_DIR}}/{ticker_lowercase}/`.
+
+Then, classify the user's request into one of **three modes**:
+
+#### Mode A: `quick_answer` — 快速問答
+**When**: The user asks a simple, specific factual question that can be answered with a single data point or a few data points directly from market data. No deep analysis is needed.
+
+**Examples**:
+- "台積電目前本益比多少" → answer: PE ratio from company_info
+- "AAPL 股價多少" → answer: current price
+- "鴻海殖利率多少" → answer: dividend yield
+- "台積電的 EPS 是多少" → answer: EPS
+- "NVDA 市值多少" → answer: market cap
+
+**Answerable fields** (directly from `validated_data.validated_data.company_info`):
+`current_price`, `pe_ratio`, `pb_ratio`, `eps`, `dividend_yield`, `market_cap`, `return_on_equity`, `debt_to_equity`, `revenue`, `profit_margin`, `operating_margin`, `52_week_high`, `52_week_low`, `beta`, `sector`, `industry`
+
+**Action**: Use the lightweight `quick_quote.py` script (Step 1.8) to fetch only the needed fields, reply directly. **Do NOT run full data fetch, agents, or dashboard. STOP after Step 1.8.**
+
+#### Mode B: `selective` — 選擇性分析
+**When**: The user's question focuses on one or a few specific dimensions of analysis, not a full comprehensive review.
+
+**Agent mapping** — match keywords to the required agent(s):
+
+| User Intent Keywords | Required Agent(s) | Notes |
+|---------------------|-------------------|-------|
+| 財務、基本面、營收、獲利、估值、財報 | `financial_analyst` | May also add `industry_macro` for context |
+| 技術面、K線、趨勢、支撐壓力、RSI、MACD | `technical_analyst` | |
+| 風險報酬、Sharpe、回撤、波動度、量化 | `quantitative_analyst` | |
+| 產業、競爭、景氣、總經、供應鏈 | `industry_macro` | |
+| 新聞、市場情緒、輿論、消息面 | `news_sentiment` | |
+| 法人、籌碼、三大法人、融資融券、外資 | `institutional_flow` | |
+| 值不值得買、投資建議 (but scoped) | `financial_analyst` + `technical_analyst` | When user asks about buy/sell but in casual tone with specific focus |
+
+**Smart bundling rules**:
+- If only 1 agent is selected, consider adding 1 complementary agent for richer context (e.g., `financial_analyst` → also add `industry_macro`)
+- Always include `data-fetcher` + `data-validator` (Step 2 is always needed)
+- Maximum: if user's question maps to 4+ agents, switch to `full_analysis` mode instead
+
+**Action**: Execute Steps 2-3, then launch ONLY the selected agents (Step 4-selective), produce a partial `integrated_report.json` with `"mode": "selective"` and `"active_analysts"` list, generate dashboard (which will only show relevant sections). Continue to Steps 5-7 but only for the active agents.
+
+#### Mode C: `full_analysis` — 完整分析 (Original behavior)
+**When**: The user asks for a comprehensive stock analysis, general investment evaluation, or the intent is broad/ambiguous.
+
+**Examples**:
+- "分析台積電" → full
+- "幫我看看 AAPL" → full
+- "這支股票值得投資嗎" → full
+- "個股分析 2330.TW" → full
+
+**Action**: Execute the full 7-step pipeline as originally designed.
 
 ### Step 1.5: Cache Check (Today's Report)
-Run this check via Bash:
+
+**Skip this step entirely if mode is `quick_answer`** — always fetch fresh data for quick questions.
+
+For `full_analysis` and `selective` modes, run this check via Bash:
 ```bash
 # Check if today's dashboard already exists
 TODAY=$(date +%Y-%m-%d)
@@ -51,7 +105,8 @@ else
 fi
 ```
 
-- If result is **`CACHE_HIT`**: Tell the user "今日已有 {ticker} 分析報告，直接開啟", then run `open {{OUTPUT_DIR}}/{name}/dashboard.html` and **STOP** — skip all remaining steps.
+- If result is **`CACHE_HIT`** and mode is `full_analysis`: Tell the user "今日已有 {ticker} 分析報告，直接開啟", then run `open {{OUTPUT_DIR}}/{name}/dashboard.html` and **STOP**.
+- If result is **`CACHE_HIT`** and mode is `selective`: Continue anyway (selective analysis may cover different dimensions than cached full report).
 - If result is `CACHE_MISS_STALE` or `CACHE_MISS_NONE`: Continue to Step 2.
 
 ### Step 2: Fetch & Validate Data (Python scripts)
@@ -83,13 +138,49 @@ Then extract the key data points from `validated_data.validated_data` (the neste
 - **TWSE data** (for Taiwan stocks): `twse_data.institutional_trading` (三大法人買賣超) and `twse_data.margin_trading` (融資融券)
 - **Note**: News is NOT in validated_data — the sentiment agent handles news collection independently via WebSearch
 
-### Step 4: Launch 6 Analyst Agents (in parallel)
-Use the **Agent tool** to launch 6 agents simultaneously. Each agent receives:
+### Step 1.8: Quick Answer Early Exit (mode = `quick_answer` ONLY)
+
+**If mode is `quick_answer`, SKIP Steps 2 and 3 entirely.** Instead, use the lightweight `quick_quote.py` script:
+
+```bash
+python {{SKILLS_DIR}}/stock-data-fetcher/scripts/quick_quote.py {TICKER}
+```
+
+Or, if you know the user only needs specific fields (e.g., just the price):
+```bash
+python {{SKILLS_DIR}}/stock-data-fetcher/scripts/quick_quote.py {TICKER} --fields current_price,currency,company_name
+```
+
+Then reply to the user in natural language (繁體中文), for example:
+- User: "台積電目前股價" → "台積電（2330.TW）目前股價為 NT$890.0。"
+- User: "AAPL 殖利率多少" → "Apple（AAPL）目前殖利率為 0.55%，股價為 US$198.50。"
+- User: "台積電本益比多少" → "台積電（2330.TW）目前本益比為 28.5。"
+
+**Rules**:
+1. Keep the response concise (1-3 sentences). Only include what the user asked for + minimal context.
+2. Append: "（資料來源：Yahoo Finance，{date}）"
+3. **STOP here. Do NOT proceed to Step 2 or beyond. No agents, no dashboard.**
+
+---
+
+### Step 4: Launch Analyst Agents
+
+**If mode is `full_analysis`**: Launch all 6 agents in parallel (original behavior).
+**If mode is `selective`**: Launch ONLY the agents identified in Step 1. Still use the Agent tool in parallel for all selected agents.
+
+For both modes, use the **Agent tool** to launch agents in parallel. Each agent receives:
 1. The role description from its SKILL.md
 2. The relevant data extracted from validated_data.json
-3. Instructions to write its analysis as JSON to the output directory
+3. Instructions to output its analysis result
 
-The 6 analysts are:
+**CRITICAL — Agent Output Method (防止亂碼)**:
+Sub-agents running in background cannot reliably write files (permission issues). Therefore:
+- **DO NOT** instruct agents to write JSON files themselves.
+- Instead, instruct each agent to **return the complete JSON in its response text** (inside a ```json code block).
+- After all agents complete, the **orchestrator (you) reads each agent's response**, extracts the JSON, and uses the **Write tool** to save each file (e.g., `financial_analysis.json`).
+- **NEVER use bash heredoc (`cat << EOF`)** to write JSON containing Chinese text — this corrupts UTF-8 multi-byte characters. Always use the Write tool.
+
+The 6 analysts (launch all for `full_analysis`, or only the selected ones for `selective`):
 1. **Financial Analyst** — Fundamental analysis (profitability, valuation, financial structure, dividends)
 2. **Technical Analyst** — Price action analysis (trend, support/resistance, momentum indicators)
 3. **Quantitative Analyst** — First run `python {{SKILLS_DIR}}/stock-quant-analyst/scripts/analyze_quant.py --input {validated_data} --output {output_dir}/quant_analysis.json`, then interpret the results
@@ -103,10 +194,37 @@ The 6 analysts are:
 Every agent prompt MUST include this instruction block verbatim:
 > 你必須遵守 Zero Hallucination Policy：(1) 絕對禁止使用訓練資料填補缺失數據 (2) 所有缺失或不確定的資料必須列入 data_limitations 欄位 (3) summary 最後一段必須以「⚠ 資料限制」揭露不足之處 (4) 寧可留白不可捏造。data_limitations 為必填欄位。
 
-Each agent must write a JSON file to the output directory with its analysis results. **Every agent output must include a `data_limitations` array field.**
+Each agent must return its JSON analysis in its response. **Every agent output must include a `data_limitations` array field.**
 
-### Step 5: Integration — Synthesize All Analyses
-After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN reasoning as Claude, produce `integrated_report.json` that matches this EXACT structure:
+### Step 4.5: Save Agent Outputs (orchestrator writes all files)
+
+After all agents complete:
+1. Extract the JSON from each agent's response text.
+2. Use the **Write tool** to save each file to the output directory (e.g., `financial_analysis.json`, `industry_analysis.json`, etc.).
+3. **NEVER use Bash heredoc** to write these files — always use the Write tool to guarantee correct UTF-8 encoding.
+
+### Step 5: Integration — Synthesize Analyses
+
+Read all the agent output JSONs you just saved.
+
+Then, using YOUR OWN reasoning as Claude, produce `integrated_report.json`. For `selective` mode, add these two extra fields at the top level:
+```json
+{
+  "mode": "selective",
+  "active_analysts": ["financial_analyst", "industry_macro"],
+  ...
+}
+```
+For `full_analysis` mode, add: `"mode": "full_analysis"` (or omit — dashboard treats missing mode as full).
+
+**Selective mode scoring rules**:
+- `dimension_scores`: Only include dimensions for active analysts. Omit the rest (do NOT fill with default 5.0).
+- `overall_score`: Weighted average using ONLY the active analysts. Re-normalize their weights to sum to 100%. For example, if only `financial_analyst` (25%) and `industry_macro` (20%) are active, their re-normalized weights are 55.6% and 44.4%.
+- `analysts`: Only include entries for active analysts.
+- `narrative_report`: Only write sections relevant to the active analysts. Omit irrelevant sections (e.g., skip `technical_analysis` if no technical analyst ran). Always include `investment_summary` and `data_limitations`.
+- `metrics`: Always include if data is available (comes from validated_data, not agents).
+
+The full JSON structure is:
 
 ```json
 {
@@ -196,6 +314,8 @@ After all 6 agents complete, read all their output JSONs. Then, using YOUR OWN r
 3. 在 `narrative_report.data_limitations` 中以自然語言段落描述主要限制
 4. 若超過 3 個 agent 報告重大資料限制，整體 `confidence_level` 不得高於 "Medium"
 
+**Writing integrated_report.json**: Use the **Write tool** to save the file. NEVER use Bash heredoc — it corrupts Chinese characters.
+
 ### Step 6: Generate Dashboard (Python script)
 ```bash
 python {{SKILLS_DIR}}/stock-dashboard/scripts/generate_dashboard.py \
@@ -203,6 +323,8 @@ python {{SKILLS_DIR}}/stock-dashboard/scripts/generate_dashboard.py \
   --validated {{OUTPUT_DIR}}/{name}/validated_data.json \
   --output {{OUTPUT_DIR}}/{name}/dashboard.html
 ```
+
+The dashboard script automatically detects the `mode` and `active_analysts` fields from `integrated_report.json` and renders only the relevant sections for selective mode.
 
 ### Step 7: Open Dashboard
 ```bash

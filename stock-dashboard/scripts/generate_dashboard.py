@@ -104,6 +104,11 @@ def generate_html_dashboard(integrated_report, validated_data):
 
     logo_uri = load_logo_base64()
 
+    # Detect analysis mode (selective vs full)
+    mode = integrated_report.get('mode', 'full_analysis')
+    active_analysts = integrated_report.get('active_analysts', None)
+    is_selective = mode == 'selective' and active_analysts is not None
+
     # Support both old and new JSON structures
     metadata = integrated_report.get('metadata', {})
     stock_info = integrated_report.get('stock_info', metadata)
@@ -175,14 +180,23 @@ def generate_html_dashboard(integrated_report, validated_data):
 
     rating_color, rating_class, rating_cn, rating_en = get_rating_color(overall_score)
 
-    radar_data = {
-        'fundamental': normalize_score(scores.get('fundamental', 5.0)),
-        'technical': normalize_score(scores.get('technical', 5.0)),
-        'quantitative': normalize_score(scores.get('quantitative', 5.0)),
-        'industry': normalize_score(scores.get('industry', 5.0)),
-        'sentiment': normalize_score(scores.get('sentiment', 5.0)),
-        'fund_flow': normalize_score(scores.get('fund_flow', 5.0))
+    # Map analyst names to dimension keys
+    analyst_to_dim = {
+        'financial_analyst': 'fundamental',
+        'technical_analyst': 'technical',
+        'quantitative_analyst': 'quantitative',
+        'industry_macro': 'industry',
+        'news_sentiment': 'sentiment',
+        'institutional_flow': 'fund_flow',
     }
+
+    all_dims = ['fundamental', 'technical', 'quantitative', 'industry', 'sentiment', 'fund_flow']
+
+    if is_selective:
+        active_dims = set(analyst_to_dim.get(a, a) for a in active_analysts)
+        radar_data = {d: normalize_score(scores.get(d, 0)) for d in all_dims if d in active_dims}
+    else:
+        radar_data = {d: normalize_score(scores.get(d, 5.0)) for d in all_dims}
 
     # Build analyst views HTML
     analyst_views_html = ""
@@ -264,11 +278,54 @@ def generate_html_dashboard(integrated_report, validated_data):
 
     # Build narrative report
     narrative = integrated_report.get('narrative_report', {})
-    summary_text = narrative.get('investment_summary', 'No summary available')
-    fundamental_text = narrative.get('fundamental_analysis', 'No analysis available')
-    technical_text = narrative.get('technical_analysis', 'No analysis available')
-    risk_text = narrative.get('risk_factors', 'No risk analysis available')
-    recommendation_text = narrative.get('investment_recommendation', 'No recommendation available')
+    # Build dimension cards and radar chart data dynamically
+    dim_labels = {
+        'fundamental': ('財務分析', 'Fundamental'),
+        'technical': ('技術分析', 'Technical'),
+        'quantitative': ('量化分析', 'Quantitative'),
+        'industry': ('產業總經', 'Industry'),
+        'sentiment': ('情緒分析', 'Sentiment'),
+        'fund_flow': ('籌碼分析', 'Fund Flow'),
+    }
+
+    dim_cards_html = ""
+    radar_labels_js = []
+    radar_values_js = []
+    for dim_key in all_dims:
+        if dim_key not in radar_data:
+            continue
+        val = radar_data[dim_key]
+        cn, en = dim_labels[dim_key]
+        dim_cards_html += f'<div class="dim-card"><div class="dim-score" style="color:{get_score_color(val)}">{val:.0f}</div><div class="dim-label">{cn}</div><div class="dim-label-en">{en}</div></div>'
+        radar_labels_js.append(f"'{cn}'")
+        radar_values_js.append(f"{val:.1f}")
+
+    dim_count = len(radar_labels_js)
+    dim_grid_cols = 'repeat(2,1fr)' if dim_count >= 2 else '1fr'
+
+    # Selective mode badge (shown in header)
+    selective_badge_html = ""
+    if is_selective:
+        analyst_cn_names = {
+            'financial_analyst': '財務', 'technical_analyst': '技術', 'quantitative_analyst': '量化',
+            'industry_macro': '產業', 'news_sentiment': '情緒', 'institutional_flow': '籌碼',
+        }
+        active_names = ' / '.join(analyst_cn_names.get(a, a) for a in active_analysts)
+        selective_badge_html = f'<span style="display:inline-block;margin-left:12px;padding:2px 10px;border-radius:3px;font-size:11px;font-weight:600;color:#fff;background:#b8860b;vertical-align:middle">精選分析：{active_names}</span>'
+
+    # Build narrative report blocks dynamically — only include sections that exist
+    narrative_sections = [
+        ('investment_summary', '投資摘要 Investment Summary', 'var(--navy)'),
+        ('fundamental_analysis', '基本面分析 Fundamental Analysis', 'var(--navy)'),
+        ('technical_analysis', '技術面分析 Technical Analysis', 'var(--navy)'),
+        ('risk_factors', '風險因素 Risk Factors', 'var(--navy)'),
+        ('investment_recommendation', '投資建議 Recommendation', 'var(--navy)'),
+    ]
+    narrative_blocks_html = ""
+    for key, heading, color in narrative_sections:
+        text = narrative.get(key)
+        if text:
+            narrative_blocks_html += f'<div class="report-block"><div class="report-heading" style="border-left-color:{color}">{heading}</div><div class="report-text">{text}</div></div>'
 
     # Build data limitations section
     data_limitations = integrated_report.get('data_limitations', [])
@@ -285,6 +342,64 @@ def generate_html_dashboard(integrated_report, validated_data):
             items_html += '</ul>'
         limitations_html = f"""
                 <div class="report-block"><div class="report-heading" style="border-left-color:var(--amber);color:var(--amber)">&#9888; 資料限制 Data Limitations</div><div class="report-text">{items_html}</div></div>"""
+
+    # Pre-build chart section HTML and JS (avoids nested f-string issues in Python 3.9)
+    labels_js = ",".join(radar_labels_js)
+    values_js = ",".join(radar_values_js)
+
+    if dim_count >= 3:
+        # Radar chart
+        chart_html = (
+            f'<div class="radar-wrap">'
+            f'<div class="radar-container"><canvas id="radarChart"></canvas></div>'
+            f'<div style="display:grid;grid-template-columns:{dim_grid_cols};gap:12px">'
+            f'{dim_cards_html}</div></div>'
+        )
+        chart_js = (
+            f"var ctx=document.getElementById('radarChart').getContext('2d');"
+            f"new Chart(ctx,{{type:'radar',data:{{labels:[{labels_js}],"
+            f"datasets:[{{label:'Score',data:[{values_js}],"
+            f"borderColor:'#003366',backgroundColor:'rgba(0,51,102,0.08)',fill:true,"
+            f"pointBackgroundColor:'#003366',pointBorderColor:'#fff',pointBorderWidth:2,"
+            f"borderWidth:2,pointRadius:4,pointHoverRadius:6}}]}},"
+            f"options:{{responsive:true,maintainAspectRatio:false,"
+            f"plugins:{{legend:{{display:false}}}},"
+            f"scales:{{r:{{beginAtZero:true,max:100,"
+            f"ticks:{{color:'#adb5bd',stepSize:20,backdropColor:'transparent',font:{{size:10}}}},"
+            f"grid:{{color:'#dee2e6'}},angleLines:{{color:'#dee2e6'}},"
+            f"pointLabels:{{color:'#495057',font:{{size:12,weight:'600'}}}}}}}}}}}});"
+        )
+    else:
+        # Horizontal bar chart for < 3 dimensions
+        bar_colors = ",".join(
+            f"'{get_score_color(float(v))}'" for v in radar_values_js
+        )
+        chart_height = 60 * dim_count + 40
+        chart_html = (
+            f'<div style="max-width:480px;margin:0 auto">'
+            f'<canvas id="barChart" height="{chart_height}"></canvas></div>'
+            f'<div style="display:grid;grid-template-columns:{dim_grid_cols};gap:12px;margin-top:20px">'
+            f'{dim_cards_html}</div>'
+        )
+        chart_js = (
+            f"var bctx=document.getElementById('barChart').getContext('2d');"
+            f"var barColors=[{bar_colors}];"
+            f"new Chart(bctx,{{type:'bar',data:{{labels:[{labels_js}],"
+            f"datasets:[{{data:[{values_js}],backgroundColor:barColors,"
+            f"borderColor:barColors,borderWidth:1,borderRadius:4,barThickness:28}}]}},"
+            f"options:{{indexAxis:'y',responsive:true,maintainAspectRatio:false,"
+            f"plugins:{{legend:{{display:false}}}},"
+            f"scales:{{x:{{beginAtZero:true,max:100,"
+            f"ticks:{{color:'#adb5bd',stepSize:20,font:{{size:11}}}},"
+            f"grid:{{color:'#e9ecef'}}}},"
+            f"y:{{ticks:{{color:'#495057',font:{{size:13,weight:'600'}}}},"
+            f"grid:{{display:false}}}}}}}}}});"
+        )
+
+    # Nav label for dimensions section
+    nav_dim_label = "精選分析" if is_selective else "多維分析"
+    dim_section_title = "精選分析" if is_selective else "多維度分析"
+    dim_section_title_en = "Selective Analysis" if is_selective else "Six-Dimension Scoring"
 
     conf_map = {
         'Very High': 95, 'High': 85, 'Medium-High': 75,
@@ -431,8 +546,8 @@ def generate_html_dashboard(integrated_report, validated_data):
             </div>
             <div class="header-stock">
                 <span class="stock-name">{company_name}</span>
-                <span class="stock-ticker">{ticker}</span>
-                {"" if not sparkline_svg else f'''<div class="sparkline-wrap">{sparkline_svg}<span class="spark-price">{spark_price_str}</span><span class="spark-change {spark_class}">{spark_change_str}</span></div>'''}
+                <span class="stock-ticker">{ticker}</span>{selective_badge_html}
+                {"" if not sparkline_svg else f'''<div class="sparkline-wrap"><span style="font-size:10px;opacity:.45;margin-right:2px">近3月</span>{sparkline_svg}<span class="spark-price">{spark_price_str}</span><span class="spark-change {spark_class}">{spark_change_str}</span></div>'''}
             </div>
         </div>
     </div>
@@ -440,7 +555,7 @@ def generate_html_dashboard(integrated_report, validated_data):
     <div class="nav">
         <div class="nav-inner">
             <a href="#overview">投資評等</a>
-            <a href="#dimensions">多維分析</a>
+            <a href="#dimensions">{nav_dim_label}</a>
             <a href="#metrics">財務指標</a>
             <a href="#analysts">分析師觀點</a>
             <a href="#report">研究報告</a>
@@ -485,19 +600,9 @@ def generate_html_dashboard(integrated_report, validated_data):
         </section>
 
         <section id="dimensions" class="section">
-            <div class="section-title">多維度分析<span class="section-title-en">Six-Dimension Scoring</span></div>
+            <div class="section-title">{dim_section_title}<span class="section-title-en">{dim_section_title_en}</span></div>
             <div class="card"><div class="card-body">
-                <div class="radar-wrap">
-                    <div class="radar-container"><canvas id="radarChart"></canvas></div>
-                    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
-                        <div class="dim-card"><div class="dim-score" style="color:{get_score_color(radar_data['fundamental'])}">{radar_data['fundamental']:.0f}</div><div class="dim-label">財務分析</div><div class="dim-label-en">Fundamental</div></div>
-                        <div class="dim-card"><div class="dim-score" style="color:{get_score_color(radar_data['technical'])}">{radar_data['technical']:.0f}</div><div class="dim-label">技術分析</div><div class="dim-label-en">Technical</div></div>
-                        <div class="dim-card"><div class="dim-score" style="color:{get_score_color(radar_data['quantitative'])}">{radar_data['quantitative']:.0f}</div><div class="dim-label">量化分析</div><div class="dim-label-en">Quantitative</div></div>
-                        <div class="dim-card"><div class="dim-score" style="color:{get_score_color(radar_data['industry'])}">{radar_data['industry']:.0f}</div><div class="dim-label">產業總經</div><div class="dim-label-en">Industry</div></div>
-                        <div class="dim-card"><div class="dim-score" style="color:{get_score_color(radar_data['sentiment'])}">{radar_data['sentiment']:.0f}</div><div class="dim-label">情緒分析</div><div class="dim-label-en">Sentiment</div></div>
-                        <div class="dim-card"><div class="dim-score" style="color:{get_score_color(radar_data['fund_flow'])}">{radar_data['fund_flow']:.0f}</div><div class="dim-label">籌碼分析</div><div class="dim-label-en">Fund Flow</div></div>
-                    </div>
-                </div>
+                {chart_html}
             </div></div>
         </section>
 
@@ -514,11 +619,7 @@ def generate_html_dashboard(integrated_report, validated_data):
         <section id="report" class="section">
             <div class="section-title">詳細研究報告<span class="section-title-en">Research Report</span></div>
             <div class="card"><div class="card-body">
-                <div class="report-block"><div class="report-heading">投資摘要 Investment Summary</div><div class="report-text">{summary_text}</div></div>
-                <div class="report-block"><div class="report-heading">基本面分析 Fundamental Analysis</div><div class="report-text">{fundamental_text}</div></div>
-                <div class="report-block"><div class="report-heading">技術面分析 Technical Analysis</div><div class="report-text">{technical_text}</div></div>
-                <div class="report-block"><div class="report-heading">風險因素 Risk Factors</div><div class="report-text">{risk_text}</div></div>{limitations_html}
-                <div class="report-block"><div class="report-heading">投資建議 Recommendation</div><div class="report-text">{recommendation_text}</div></div>
+                {narrative_blocks_html}{limitations_html}
             </div></div>
         </section>
 
@@ -539,8 +640,7 @@ def generate_html_dashboard(integrated_report, validated_data):
 
     <script>
         function toggleAnalyst(row){{var d=row.querySelector('.analyst-detail'),a=row.querySelector('.analyst-arrow');if(d.classList.contains('open')){{d.classList.remove('open');a.textContent='+'}}else{{d.classList.add('open');a.textContent='\u2212'}}}}
-        var ctx=document.getElementById('radarChart').getContext('2d');
-        new Chart(ctx,{{type:'radar',data:{{labels:['財務','技術','量化','產業','情緒','籌碼'],datasets:[{{label:'Score',data:[{radar_data['fundamental']:.1f},{radar_data['technical']:.1f},{radar_data['quantitative']:.1f},{radar_data['industry']:.1f},{radar_data['sentiment']:.1f},{radar_data['fund_flow']:.1f}],borderColor:'#003366',backgroundColor:'rgba(0,51,102,0.08)',fill:true,pointBackgroundColor:'#003366',pointBorderColor:'#fff',pointBorderWidth:2,borderWidth:2,pointRadius:4,pointHoverRadius:6}}]}},options:{{responsive:true,maintainAspectRatio:false,plugins:{{legend:{{display:false}}}},scales:{{r:{{beginAtZero:true,max:100,ticks:{{color:'#adb5bd',stepSize:20,backdropColor:'transparent',font:{{size:10}}}},grid:{{color:'#dee2e6'}},angleLines:{{color:'#dee2e6'}},pointLabels:{{color:'#495057',font:{{size:12,weight:'600'}}}}}}}}}}}});
+        {chart_js}
     </script>
 </body>
 </html>"""
