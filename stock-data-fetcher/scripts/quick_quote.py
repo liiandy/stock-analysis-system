@@ -7,6 +7,7 @@ Designed for quick_answer mode where no full analysis is needed.
 Usage:
     python quick_quote.py 2330.TW
     python quick_quote.py AAPL --fields current_price,pe_ratio
+    python quick_quote.py 2890.TW --history 2mo
 """
 
 import argparse
@@ -52,6 +53,64 @@ def extract_field(info: dict, keys: tuple):
     return None
 
 
+def quick_history(ticker: str, period: str = "2mo") -> dict:
+    """Fetch historical price data and compute trend summary."""
+    yf_ticker = yf.Ticker(ticker)
+    hist = yf_ticker.history(period=period)
+
+    if hist.empty:
+        return {"ticker": ticker, "error": "No historical data available"}
+
+    closes = hist["Close"]
+    volumes = hist["Volume"]
+    start_price = round(float(closes.iloc[0]), 2)
+    end_price = round(float(closes.iloc[-1]), 2)
+    change_pct = round((end_price - start_price) / start_price * 100, 2)
+    high = round(float(closes.max()), 2)
+    low = round(float(closes.min()), 2)
+    high_date = str(closes.idxmax().date())
+    low_date = str(closes.idxmin().date())
+    avg_volume = int(volumes.mean())
+
+    # Simple trend direction
+    if change_pct > 5:
+        trend = "上漲"
+    elif change_pct < -5:
+        trend = "下跌"
+    else:
+        trend = "盤整"
+
+    # Weekly closing prices for sparkline context
+    weekly = closes.resample("W").last().dropna()
+    weekly_prices = [{"date": str(d.date()), "close": round(float(p), 2)} for d, p in weekly.items()]
+
+    info = yf_ticker.info
+    company_name = info.get("longName") or info.get("shortName") or ticker
+    currency = info.get("currency", "")
+
+    return {
+        "ticker": ticker,
+        "company_name": company_name,
+        "currency": currency,
+        "period": period,
+        "timestamp": datetime.now().isoformat(),
+        "start_date": str(hist.index[0].date()),
+        "end_date": str(hist.index[-1].date()),
+        "start_price": start_price,
+        "end_price": end_price,
+        "change_pct": change_pct,
+        "change_pct_fmt": f"{'+' if change_pct >= 0 else ''}{change_pct}%",
+        "period_high": high,
+        "period_high_date": high_date,
+        "period_low": low,
+        "period_low_date": low_date,
+        "avg_volume": avg_volume,
+        "trend": trend,
+        "trading_days": len(closes),
+        "weekly_prices": weekly_prices,
+    }
+
+
 def quick_quote(ticker: str, fields: Optional[List[str]] = None) -> dict:
     """Fetch minimal stock data from yfinance."""
     yf_ticker = yf.Ticker(ticker)
@@ -88,11 +147,16 @@ def main():
     parser.add_argument("ticker", help="Stock ticker (e.g., 2330.TW, AAPL)")
     parser.add_argument("--fields", "-f", default=None,
                         help="Comma-separated fields to fetch (default: all)")
+    parser.add_argument("--history", default=None,
+                        help="Fetch price history for given period (e.g., 1mo, 2mo, 3mo, 6mo, 1y)")
     args = parser.parse_args()
 
     try:
-        fields = args.fields.split(",") if args.fields else None
-        result = quick_quote(args.ticker.upper(), fields)
+        if args.history:
+            result = quick_history(args.ticker.upper(), args.history)
+        else:
+            fields = args.fields.split(",") if args.fields else None
+            result = quick_quote(args.ticker.upper(), fields)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         print(json.dumps({"status": "error", "message": str(e)}), file=sys.stderr)

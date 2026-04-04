@@ -43,14 +43,23 @@ First, extract the stock ticker from the user's message.
 Then, classify the user's request into one of **three modes**:
 
 #### Mode A: `quick_answer` — 快速問答
-**When**: The user asks a simple, specific factual question that can be answered with a single data point or a few data points directly from market data. No deep analysis is needed.
+**When**: The user asks a simple, specific factual question that can be answered with a single data point, a few data points, or a brief price trend summary directly from market data. No deep analysis is needed.
 
-**Examples**:
+**Examples (static fields)**:
 - "台積電目前本益比多少" → answer: PE ratio from company_info
 - "AAPL 股價多少" → answer: current price
 - "鴻海殖利率多少" → answer: dividend yield
 - "台積電的 EPS 是多少" → answer: EPS
 - "NVDA 市值多少" → answer: market cap
+
+**Examples (price trend — use `--history`)**:
+- "永豐金近兩月股價趨勢" → `--history 2mo`
+- "台積電最近走勢如何" → `--history 1mo`
+- "AAPL 近半年股價" → `--history 6mo`
+- "鴻海最近漲還跌" → `--history 1mo`
+- "台積電近一年表現" → `--history 1y`
+
+**Trend keyword triggers**: 股價趨勢、走勢、近X月股價、漲跌、股價變化、price trend、recent performance、表現如何
 
 **Answerable fields** (directly from `validated_data.validated_data.company_info`):
 `current_price`, `pe_ratio`, `pb_ratio`, `eps`, `dividend_yield`, `market_cap`, `return_on_equity`, `debt_to_equity`, `revenue`, `profit_margin`, `operating_margin`, `52_week_high`, `52_week_low`, `beta`, `sector`, `industry`
@@ -159,23 +168,28 @@ Then extract the key data points from `validated_data.validated_data` (the neste
 
 **If mode is `quick_answer`, SKIP Steps 2 and 3 entirely.** Instead, use the lightweight `quick_quote.py` script:
 
-```bash
-python {{SKILLS_DIR}}/stock-data-fetcher/scripts/quick_quote.py {TICKER}
-```
-
-Or, if you know the user only needs specific fields (e.g., just the price):
+**For static fields** (price, PE, EPS, etc.):
 ```bash
 python {{SKILLS_DIR}}/stock-data-fetcher/scripts/quick_quote.py {TICKER} --fields current_price,currency,company_name
 ```
 
+**For price trend questions** (走勢、趨勢、近X月股價):
+```bash
+python {{SKILLS_DIR}}/stock-data-fetcher/scripts/quick_quote.py {TICKER} --history {PERIOD}
+```
+Where `{PERIOD}` is mapped from user's request: 近一月→`1mo`, 近兩月→`2mo`, 近三月→`3mo`, 近半年→`6mo`, 近一年→`1y`. Default: `1mo`.
+
+Returns: `start_price`, `end_price`, `change_pct_fmt`, `trend` (上漲/下跌/盤整), `period_high/low`, `weekly_prices`.
+
 Then reply to the user in natural language (繁體中文), for example:
 - User: "台積電目前股價" → "台積電（2330.TW）目前股價為 NT$890.0。"
 - User: "AAPL 殖利率多少" → "Apple（AAPL）目前殖利率為 0.55%，股價為 US$198.50。"
-- User: "台積電本益比多少" → "台積電（2330.TW）目前本益比為 28.5。"
+- User: "永豐金近兩月股價趨勢" → "永豐金（2890.TW）近兩月走勢為**盤整**，從 NT$18.50 → NT$18.85（+1.89%）。期間最高 NT$19.20（3/15），最低 NT$17.90（2/10）。"
 
 **Rules**:
-1. Keep the response concise (1-3 sentences). Only include what the user asked for + minimal context.
-2. Append: "（資料來源：Yahoo Finance，{date}）"
+1. Keep the response concise (1-3 sentences for static, 2-4 sentences for trend). Only include what the user asked for + minimal context.
+2. For trend answers, always include: trend direction, start→end price, change %, period high/low.
+3. Append: "（資料來源：Yahoo Finance，{date}）"
 3. **STOP here. Do NOT proceed to Step 2 or beyond. No agents, no dashboard.**
 
 ---
